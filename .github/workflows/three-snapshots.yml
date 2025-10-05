@@ -64,3 +64,13 @@ jobs:
           else
             echo "No changes to commit."
           fi
+          - name: Save results to docs/outputs
+  run: |
+    cp astra4_chart.png docs/outputs/
+    cp astra4_history.csv docs/outputs/
+    git config user.name "github-actions[bot]"
+    git config user.email "github-actions[bot]@users.noreply.github.com"
+    git add docs/outputs/
+    git commit -m "Add daily snapshot outputs"
+    git push
+
