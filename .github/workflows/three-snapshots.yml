@@ -1,11 +1,14 @@
 name: Daily Astra4 Snapshots
 
+permissions:
+  contents: write   # ← これが無いと push できません
+
 on:
-  schedule:
-    - cron: "0 0 * * 1-5"     # 平日 09:00 JST
-    - cron: "30 2 * * 1-5"    # 平日 11:30 JST
-    - cron: "30 6 * * 1-5"    # 平日 15:30 JST
   workflow_dispatch:
+  schedule:
+    - cron: "0 0 * * 1-5"   # JST 09:00
+    - cron: "30 2 * * 1-5"  # JST 11:30
+    - cron: "30 6 * * 1-5"  # JST 15:30
 
 jobs:
   build:
@@ -13,6 +16,9 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0           # push で履歴が必要
+          persist-credentials: true
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -20,27 +26,41 @@ jobs:
           python-version: "3.10"
 
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: |
+          pip install -r requirements.txt
 
       - name: Run Astra4 snapshot
-            - name: Verify outputs exist
+        run: |
+          python src/astra4_snapshot.py
+
+      - name: Verify outputs exist
         run: |
           echo "=== ls docs/outputs ==="
           ls -la docs/outputs || true
-          # いずれか1つでもあればOK（全滅時はtxtだけの可能性あり）
-          test -f docs/outputs/astra4_chart.png || test -f docs/outputs/astra4_history.csv || test -f docs/outputs/astra4_latest.txt
-      - name: Upload artifacts (for debugging)
+          # 何か1つでもあればOK（全滅時は txt だけの可能性あり）
+          test -f docs/outputs/astra4_chart.png || \
+          test -f docs/outputs/astra4_history.csv || \
+          test -f docs/outputs/astra4_latest.txt
+
+      - name: Upload artifacts (debug)
         uses: actions/upload-artifact@v4
         with:
           name: astra4-outputs
           path: docs/outputs/*
 
-        run: python src/astra4_snapshot.py
-
       - name: Commit and push results
         run: |
-          git config user.name "github-actions[bot]"
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add docs/outputs/* || true
-          git commit -m "Auto update: $(date '+%Y-%m-%d %H:%M')" || true
-          git push || true
+          echo "=== git status ==="
+          git status
+          # 変更があるときだけコミット＆プッシュ
+          if ! git diff --cached --quiet; then
+            git commit -m "Auto update: outputs $(date -u '+%Y-%m-%d %H:%M:%SZ')"
+            git push
+            echo "pushed ✅"
+          else
+            echo "No changes to commit."
+          fi
