@@ -1,171 +1,164 @@
 # -*- coding: utf-8 -*-
-"""
-Astra-4 Intraday (1-day) Chart Generator
-- 4銘柄を等金額加重で前日終値比の平均変化率を時系列化（5分足）
-- 黒背景のSNS映えグラフを生成
-- 出力: docs/outputs/astra4_intraday.png, astra4_intraday.csv, astra4_post_intraday.txt
-"""
+# Astra-4 Intraday (SNS向け黒背景版)
+# 東証銘柄の分足データを取得し、前日終値比を可視化
+
 import os
 from datetime import datetime, timezone, timedelta
-from typing import Dict, List
-
+from typing import Dict, List, Optional
 import pandas as pd
 import yfinance as yf
 import matplotlib.pyplot as plt
 
-# ========= 設定 =========
-TICKERS: List[str] = ["9348.T", "5595.T", "402A.T", "186A.T"]  # ispace, QPS研究所, アクセルスペースHD, アストロスケールHD
+# ==== 設定 ====
+TICKERS: List[str] = ["9348.T", "5595.T", "402A.T", "186A.T"]
 OUT_DIR = "docs/outputs"
 IMG_PATH = os.path.join(OUT_DIR, "astra4_intraday.png")
 CSV_PATH = os.path.join(OUT_DIR, "astra4_intraday.csv")
 POST_PATH = os.path.join(OUT_DIR, "astra4_post_intraday.txt")
 
-# 画像サイズ（X/note映え: 16:9）
-FIG_W, FIG_H = 16, 9
+os.makedirs(OUT_DIR, exist_ok=True)
 
-# ========= ユーティリティ =========
-def jst_now():
+# ==== 共通関数 ====
+def jst_now() -> datetime:
+    """現在時刻（JST）"""
     return datetime.now(timezone(timedelta(hours=9)))
 
-def ensure_dirs():
-    os.makedirs(OUT_DIR, exist_ok=True)
+def _pick_close(df: pd.DataFrame, ticker: str) -> Optional[pd.Series]:
+    """
+    yfinanceの返り値（単列/マルチカラム）両対応でClose列を返す。
+    """
+    if df is None or len(df) == 0:
+        return None
+    # 単列DataFrame
+    if "Close" in df.columns:
+        s = df["Close"].dropna()
+        return s if len(s) else None
+    # マルチカラムDataFrame
+    if isinstance(df.columns, pd.MultiIndex):
+        if (ticker, "Close") in df.columns:
+            s = df[(ticker, "Close")].dropna()
+            return s if len(s) else None
+        for col in df.columns:
+            try:
+                top, leaf = col
+                if leaf == "Close" and str(top).split()[0].upper() == ticker.upper():
+                    s = df[col].dropna()
+                    return s if len(s) else None
+            except Exception:
+                pass
+    return None
 
-def fetch_prev_close(ticker: str) -> float:
+def load_intraday_close(ticker: str) -> Optional[pd.Series]:
     """
-    直近日の終値（当日を除く最新の有効終値）を取得
+    直近分足の終値Seriesを返す。
+    1日×5分足 → ダメなら5日×15分足 にフォールバック。
     """
-    d = yf.download(ticker, period="10d", interval="1d", auto_adjust=False, progress=False)
-    if d is None or d.empty:
-        raise RuntimeError(f"prev close not found: {ticker}")
-    # 当日がまだ完結していない場合があるので、直近の「確定終値」を採用
-    prev = d["Close"].dropna()
-    if len(prev) < 2:
-        # 最低2本必要（前営業日）
-        raise RuntimeError(f"insufficient daily data for: {ticker}")
-    # 最後の1本が当日分の途中足でも close は出るので、直近「前営業日」を選ぶ
-    return float(prev.iloc[-2])
+    for period, interval in [("1d", "5m"), ("5d", "15m")]:
+        try:
+            df = yf.download(
+                tickers=ticker, period=period, interval=interval,
+                auto_adjust=False, progress=False, prepost=False, threads=False
+            )
+            s = _pick_close(df, ticker)
+            if s is not None and len(s) > 0:
+                return s
+        except Exception as e:
+            print(f"[WARN] intraday fetch failed for {ticker}: {e}")
+    return None
 
-def fetch_intraday_series(ticker: str) -> pd.Series:
+def fetch_prev_close(ticker: str) -> Optional[float]:
     """
-    当日の5分足終値シリーズを取得
+    日足終値を取得。
     """
-    # 当日分を period="1d", interval="5m" で取得
-    d = yf.download(ticker, period="1d", interval="5m", auto_adjust=False, progress=False)
-    if d is None or d.empty:
-        raise RuntimeError(f"intraday not found: {ticker}")
-    s = d["Close"].dropna()
-    s.name = ticker
-    return s
+    try:
+        d = yf.download(
+            tickers=ticker, period="10d", interval="1d",
+            auto_adjust=False, progress=False, prepost=False, threads=False
+        )
+        s = _pick_close(d, ticker)
+        if s is not None and len(s) > 0:
+            return float(s.iloc[-1])
+    except Exception as e:
+        print(f"[WARN] daily fetch failed for {ticker}: {e}")
+    return None
 
-# ========= メインロジック =========
+
+# ==== メイン処理 ====
 def main():
-    ensure_dirs()
-
-    # 前日終値（各銘柄）
+    intraday_data: Dict[str, pd.Series] = {}
     prev_close: Dict[str, float] = {}
+
     for t in TICKERS:
-        try:
-            prev_close[t] = fetch_prev_close(t)
-        except Exception as e:
-            print(f"[WARN] prev close fetch failed for {t}: {e}")
+        print(f"[INFO] Fetching {t} ...")
+        intraday = load_intraday_close(t)
+        prev = fetch_prev_close(t)
+        if intraday is None or prev is None:
+            print(f"[WARN] Skipping {t} (no data)")
+            continue
 
-    # 5分足を銘柄ごとに取得し、同一時刻にアライン
-    close_df = pd.DataFrame()
-    for t in TICKERS:
-        try:
-            s = fetch_intraday_series(t)
-            close_df = close_df.join(s, how="outer") if not close_df.empty else s.to_frame()
-        except Exception as e:
-            print(f"[WARN] intraday fetch failed for {t}: {e}")
+        # 前日比%
+        intraday = intraday / prev - 1.0
+        intraday_data[t] = intraday
+        prev_close[t] = prev
 
-    if close_df.empty:
-        raise RuntimeError("no intraday data for any ticker.")
+    if not intraday_data:
+        raise RuntimeError("No intraday data for any ticker.")
 
-    # 変化率（各銘柄）= 当日価格 / 前日終値 - 1
-    for t in TICKERS:
-        if t in close_df.columns and t in prev_close:
-            close_df[t] = close_df[t] / prev_close[t] - 1.0
-        else:
-            # データ欠損は列ごと除外
-            if t in close_df.columns:
-                close_df.drop(columns=[t], inplace=True)
+    # DataFrame統合
+    df = pd.DataFrame(intraday_data)
+    df.to_csv(CSV_PATH)
+    print(f"[OK] Saved CSV: {CSV_PATH}")
 
-    # 有効列のみで等金額平均
-    if close_df.empty:
-        raise RuntimeError("all tickers lacked prev close; nothing to compute.")
-    basket_pct = close_df.mean(axis=1).dropna()  # 前日比（平均）
+    # 平均バスケット（単純平均）
+    basket_pct = df.mean(axis=1)
+    title = f"Astra-4 Intraday Snapshot ({jst_now().strftime('%Y/%m/%d %H:%M')})"
 
-    # CSV 保存（%表示とインデックス値の両方）
-    df_out = pd.DataFrame({
-        "datetime": basket_pct.index.tz_localize(None) if basket_pct.index.tz is not None else basket_pct.index,
-        "pct_change": (basket_pct * 100.0).round(3),
-    })
-    # 参考: 直近のヒストリーindex（任意。無ければ省略）
-    latest_index_val = None
-    hist_path = os.path.join(OUT_DIR, "astra4_history.csv")
-    if os.path.exists(hist_path):
-        try:
-            hist = pd.read_csv(hist_path)
-            if "0" in hist.columns:
-                # 既存ヒストリーが1列名「0」の場合がある想定に合わせる
-                latest_index_val = float(hist.iloc[-1]["0"])
-            elif "index" in hist.columns:
-                latest_index_val = float(hist.iloc[-1]["index"])
-        except Exception:
-            pass
-
-    if latest_index_val is not None:
-        df_out["index_like"] = (latest_index_val * (1.0 + basket_pct)).round(2)
-
-    df_out.to_csv(CSV_PATH, index=False)
-
-    # 最終値でヘッダ（+x.xx%）を作る
-    last_pct = float(basket_pct.iloc[-1]) if len(basket_pct) else 0.0
-    sign = "+" if last_pct >= 0 else ""
-    header = f"Astra-4 日中チャート（{jst_now().strftime('%Y/%m/%d')}）  {sign}{last_pct*100:.2f}%"
-
-    # ====== 黒背景のSNS映えグラフ ======
+    # ==== 可視化 ====
     plt.close("all")
-    plt.style.use("default")
-    fig = plt.figure(figsize=(FIG_W, FIG_H), dpi=160)
+    fig = plt.figure(figsize=(16, 9), dpi=160)
     ax = fig.add_subplot(111)
     fig.patch.set_facecolor("black")
     ax.set_facecolor("black")
 
-    # 線
-    ax.plot(basket_pct.index, basket_pct.values * 100.0, linewidth=3.0, color="white")
+    ax.plot(
+        basket_pct.index,
+        basket_pct.values * 100.0,
+        linewidth=3.0,
+        color="#00FFAA",
+        label="Astra-4 Basket"
+    )
 
-    # 0%の基準線
-    ax.axhline(0, color="#666666", linewidth=1.0)
-
-    # 目盛・ラベルを白系
-    ax.tick_params(colors="white")
-    for spine in ax.spines.values():
-        spine.set_color("#444444")
-
-    ax.set_title(header, color="white", fontsize=22, pad=14)
+    ax.axhline(0, color="#444444", linewidth=1.0)
+    ax.set_title(title, color="white", fontsize=20, pad=14)
     ax.set_xlabel("Time", color="white")
     ax.set_ylabel("Change vs Prev Close (%)", color="white")
+    ax.tick_params(colors="white")
+    for spine in ax.spines.values():
+        spine.set_color("#666666")
+    ax.legend(facecolor="black", edgecolor="white", labelcolor="white")
 
-    # 余白・レイアウト
-    fig.tight_layout()
+    plt.tight_layout()
     plt.savefig(IMG_PATH, facecolor=fig.get_facecolor(), bbox_inches="tight")
     plt.close(fig)
 
-    # 投稿文（下書き）も保存
-    post = (
-        f"🚀 ASTRA-4 日中チャート {jst_now().strftime('%Y/%m/%d')}\n"
-        f"{sign}{last_pct*100:.2f}%（前日終値比）\n"
-        f"構成銘柄: ispace / QPS研究所 / アクセルスペースHD / アストロスケールHD（等金額加重）\n"
-        f"#宇宙株 #Astra4 #日本株\n"
-    )
+    # ==== 投稿文 ====
+    last_pct = basket_pct.iloc[-1] * 100.0
+    sign = "＋" if last_pct >= 0 else "－"
+
     with open(POST_PATH, "w", encoding="utf-8") as f:
-        f.write(post)
+        f.write(
+            f"📊 Astra-4 Intraday（{jst_now().strftime('%Y/%m/%d %H:%M')}）\n"
+            f"{sign}{abs(last_pct):.2f}%（前日終値比）\n"
+            "構成銘柄：OP研究所 / アクセルスペースHD / アストロスケールHD / 宇宙銘柄A\n"
+            "#宇宙株 #Astra4 #日本株 #株式市場\n"
+        )
 
-    print("✅ intraday outputs written:",
-          os.path.abspath(IMG_PATH),
-          os.path.abspath(CSV_PATH),
-          os.path.abspath(POST_PATH))
+    print(f"[OK] Intraday outputs:")
+    print(os.path.abspath(IMG_PATH))
+    print(os.path.abspath(CSV_PATH))
+    print(os.path.abspath(POST_PATH))
 
+
+# ==== 実行 ====
 if __name__ == "__main__":
     main()
