@@ -5,6 +5,7 @@
 import os
 from datetime import datetime, timezone, timedelta
 from typing import Dict, List
+import numpy as np
 import pandas as pd
 import yfinance as yf
 import matplotlib.pyplot as plt
@@ -31,30 +32,46 @@ def fetch_prev_close(ticker: str) -> float:
         raise RuntimeError(f"prev close not enough history: {ticker}")
     return float(prev.iloc[-2])
 
-# ===== Intraday データ取得（Series を必ず返す） =====
+# ===== Intraday データ取得（必ず 1D Series を返す） =====
 def fetch_intraday_series(ticker: str, prev_close: float) -> pd.Series:
     df = yf.download(ticker, period="1d", interval="5m", auto_adjust=False, progress=False)
 
-    # データが無い／Closeが無い場合は空Seriesで返す
-    if df is None or df.empty or "Close" not in df:
+    if df is None or df.empty:
         print(f"[WARN] no intraday data for {ticker}")
         return pd.Series(dtype=float, name=ticker)
 
-    # 前日終値比（割合）→ Series
-    s = (df["Close"] / prev_close - 1.0)
+    # Close 列の取り出し（MultiIndex/単一列/2D( n,1 ) どれでも 1D に矯正）
+    close = None
+    if "Close" in df.columns:
+        close = df["Close"]
+    else:
+        # yfinance が MultiIndex を返すケース
+        cand = [c for c in df.columns if (isinstance(c, tuple) and c[0] == "Close")]
+        if cand:
+            close = df[cand[0]]
 
-    # 必ず pandas.Series に揃え、名前を付ける（concatで列名に使う）
-    if not isinstance(s, pd.Series):
-        s = pd.Series(s, index=df.index)
-    s.name = ticker
+    if close is None:
+        print(f"[WARN] Close not found for {ticker}")
+        return pd.Series(dtype=float, name=ticker)
 
-    # index が DatetimeIndex でない場合の安全策
-    if not isinstance(s.index, pd.DatetimeIndex):
+    # 2D -> 1D に矯正
+    if isinstance(close, pd.DataFrame):
+        close = close.squeeze("columns")  # (n,1) -> (n,)
+    # numpy/リスト等でも 1D に落とし込む
+    if not isinstance(close, pd.Series):
+        arr = np.asarray(close).reshape(-1)  # 明示的に 1 次元へ
+        close = pd.Series(arr, index=df.index)
+
+    # index を DatetimeIndex に統一
+    if not isinstance(close.index, pd.DatetimeIndex):
         try:
-            s.index = pd.to_datetime(s.index)
+            close.index = pd.to_datetime(close.index)
         except Exception:
             pass
 
+    # 前日終値比（割合）
+    s = (pd.to_numeric(close, errors="coerce") / prev_close - 1.0)
+    s.name = ticker
     return s.dropna()
 
 # ===== メイン処理 =====
@@ -66,7 +83,6 @@ def main():
         try:
             prev_close = fetch_prev_close(t)
             s = fetch_intraday_series(t, prev_close)
-            # 空やスカラー等を排除して Series のみ保持
             if isinstance(s, pd.Series) and s.size > 0:
                 series_map[t] = s
             else:
@@ -77,13 +93,13 @@ def main():
     if not series_map:
         raise RuntimeError("no intraday series for any ticker.")
 
-    # Series 同士を列方向に結合（index は自動でアライン）
+    # Series 同士を列方向へ連結（index は自動アライン）
     df = pd.concat(series_map.values(), axis=1)
 
     # 平均（バスケット）
     basket_pct = df.mean(axis=1)
 
-    # CSV保存（平均列も含める）
+    # ===== CSV 保存 =====
     out_csv = df.copy()
     out_csv["Astra4_mean"] = basket_pct
     out_csv.to_csv(CSV_PATH, encoding="utf-8-sig", index_label="日時")
@@ -98,7 +114,8 @@ def main():
     last_change = float(basket_pct.iloc[-1] * 100.0)
     line_color = "#00e5d0" if last_change >= 0 else "#ff3b3b"
 
-    ax.plot(basket_pct.index, basket_pct.values * 100.0, linewidth=3.0, color=line_color, label="Astra-4 Basket")
+    ax.plot(basket_pct.index, basket_pct.values * 100.0, linewidth=3.0,
+            color=line_color, label="Astra-4 Basket")
     ax.axhline(0, color="#666666", linewidth=1.0)
     ax.tick_params(colors="white")
     for spine in ax.spines.values():
@@ -115,7 +132,7 @@ def main():
     plt.savefig(IMG_PATH, facecolor=fig.get_facecolor(), bbox_inches="tight")
     plt.close(fig)
 
-    # ===== SNS投稿文 =====
+    # ===== SNS 投稿文 =====
     sign = "🔺" if last_change >= 0 else "🔻"
     with open(POST_PATH, "w", encoding="utf-8") as f:
         f.write(
