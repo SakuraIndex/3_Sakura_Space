@@ -29,10 +29,15 @@ jobs:
         run: |
           pip install -r requirements.txt
 
-      # ======= ここから既存のスナップショット =======
+# ======= ここから既存のスナップショット =======
       - name: Run Astra4 snapshot
         run: |
           python src/astra4_snapshot.py
+
+      - name: Run Astra4 intraday snapshot
+        run: |
+          python src/astra4_intraday.py
+
 
       # ======= 新しく追加する1日チャート =======
       - name: Run Astra4 intraday (1-day)
