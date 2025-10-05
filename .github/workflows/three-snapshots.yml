@@ -1,7 +1,7 @@
 name: Daily Astra4 Snapshots
 
 permissions:
-  contents: write   # ← これが無いと push できません
+  contents: write   # ← pushのために必要
 
 on:
   workflow_dispatch:
@@ -17,7 +17,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0           # push で履歴が必要
+          fetch-depth: 0
           persist-credentials: true
 
       - name: Set up Python
@@ -29,25 +29,34 @@ jobs:
         run: |
           pip install -r requirements.txt
 
+      # ======= ここから既存のスナップショット =======
       - name: Run Astra4 snapshot
         run: |
           python src/astra4_snapshot.py
 
+      # ======= 新しく追加する1日チャート =======
+      - name: Run Astra4 intraday (1-day)
+        run: |
+          python src/astra4_intraday.py
+
+      # ======= 結果確認 =======
       - name: Verify outputs exist
         run: |
           echo "=== ls docs/outputs ==="
           ls -la docs/outputs || true
-          # 何か1つでもあればOK（全滅時は txt だけの可能性あり）
           test -f docs/outputs/astra4_chart.png || \
           test -f docs/outputs/astra4_history.csv || \
-          test -f docs/outputs/astra4_latest.txt
+          test -f docs/outputs/astra4_latest.txt || \
+          test -f docs/outputs/astra4_intraday.png
 
+      # ======= 成果物アップロード（デバッグ用） =======
       - name: Upload artifacts (debug)
         uses: actions/upload-artifact@v4
         with:
           name: astra4-outputs
           path: docs/outputs/*
 
+      # ======= リポジトリにコミットしてPush =======
       - name: Commit and push results
         run: |
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
@@ -56,7 +65,6 @@ jobs:
           git add docs/outputs/* || true
           echo "=== git status ==="
           git status
-          # 変更があるときだけコミット＆プッシュ
           if ! git diff --cached --quiet; then
             git commit -m "Auto update: outputs $(date -u '+%Y-%m-%d %H:%M:%SZ')"
             git push
@@ -64,13 +72,3 @@ jobs:
           else
             echo "No changes to commit."
           fi
-          - name: Save results to docs/outputs
-  run: |
-    cp astra4_chart.png docs/outputs/
-    cp astra4_history.csv docs/outputs/
-    git config user.name "github-actions[bot]"
-    git config user.email "github-actions[bot]@users.noreply.github.com"
-    git add docs/outputs/
-    git commit -m "Add daily snapshot outputs"
-    git push
-
