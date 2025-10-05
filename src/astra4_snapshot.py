@@ -9,24 +9,24 @@ TICKERS = ["9348.T", "5595.T", "402A.T", "186A.T"]
 BASE_DATE = "2024-01-04"
 BASE_VALUE = 1000
 
-# ===== 出力フォルダを作成 =====
+# ===== 出力フォルダ作成 =====
 os.makedirs("docs/outputs", exist_ok=True)
 
 # ===== データ取得（堅牢版）=====
 series_list = []
 for t in TICKERS:
     df = yf.download(t, start=BASE_DATE, interval="1d", auto_adjust=True, progress=False)
-    # 取得失敗や列欠落をスキップ
     if df is None or df.empty or "Close" not in df.columns:
+        print(f"⚠️ データなし: {t}")
         continue
     s = df["Close"].astype(float)
-    s.name = t                     # 後で列名になる
+    s.name = t
     series_list.append(s)
 
 if not series_list:
-    raise RuntimeError("No price data downloaded for any tickers. Check ticker symbols or date range.")
+    raise RuntimeError("❌ どの銘柄のデータも取得できませんでした。ティッカーや期間を確認してください。")
 
-# 日付で横結合（インデックスは日時）
+# 日付で結合
 df_all = pd.concat(series_list, axis=1).sort_index()
 
 # ===== 等金額平均指数 =====
@@ -34,7 +34,7 @@ df_all["index"] = df_all.mean(axis=1, skipna=True)
 
 valid = df_all.loc[df_all.index >= BASE_DATE, "index"].dropna()
 if valid.empty:
-    raise RuntimeError("No valid index values on/after BASE_DATE.")
+    raise RuntimeError("❌ 有効なBASE_DATE以降のデータがありません。")
 
 base = valid.iloc[0]
 df_all["astra4"] = df_all["index"] / base * BASE_VALUE
@@ -42,7 +42,7 @@ df_all["astra4"] = df_all["index"] / base * BASE_VALUE
 # ===== 最新値 =====
 latest_val = float(df_all["astra4"].iloc[-1])
 latest_date = df_all.index[-1].strftime("%Y-%m-%d")
-print(f"Astra4 index on {latest_date}: {latest_val:.2f}")
+print(f"✅ Astra4 index on {latest_date}: {latest_val:.2f}")
 
 # ===== グラフ保存 =====
 plt.figure(figsize=(8, 4))
