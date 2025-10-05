@@ -23,6 +23,18 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Run Astra4 snapshot
+            - name: Verify outputs exist
+        run: |
+          echo "=== ls docs/outputs ==="
+          ls -la docs/outputs || true
+          # いずれか1つでもあればOK（全滅時はtxtだけの可能性あり）
+          test -f docs/outputs/astra4_chart.png || test -f docs/outputs/astra4_history.csv || test -f docs/outputs/astra4_latest.txt
+      - name: Upload artifacts (for debugging)
+        uses: actions/upload-artifact@v4
+        with:
+          name: astra4-outputs
+          path: docs/outputs/*
+
         run: python src/astra4_snapshot.py
 
       - name: Commit and push results
