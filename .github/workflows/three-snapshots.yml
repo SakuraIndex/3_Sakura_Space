@@ -1,79 +1,39 @@
 name: Daily Astra4 Snapshots
 
 permissions:
-  contents: write   # ← pushのために必要
+  contents: write
 
 on:
-  workflow_dispatch:
   schedule:
-    - cron: "0 0 * * 1-5"   # JST 09:00
-    - cron: "30 2 * * 1-5"  # JST 11:30
-    - cron: "30 6 * * 1-5"  # JST 15:30
+    - cron: "35 6 * * *"   # 毎日 15:35 JST（= 06:35 UTC）
+  workflow_dispatch:
 
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
           fetch-depth: 0
           persist-credentials: true
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.10"
-
       - name: Install dependencies
-        run: |
-          pip install -r requirements.txt
-
-# ======= ここから既存のスナップショット =======
+        run: pip install -r requirements.txt
       - name: Run Astra4 snapshot
-        run: |
-          python src/astra4_snapshot.py
-
-      - name: Run Astra4 intraday snapshot
-        run: |
-          python src/astra4_intraday.py
-
-
-      # ======= 新しく追加する1日チャート =======
+        run: python src/astra4_snapshot.py
       - name: Run Astra4 intraday (1-day)
-        run: |
-          python src/astra4_intraday.py
-
-      # ======= 結果確認 =======
-      - name: Verify outputs exist
-        run: |
-          echo "=== ls docs/outputs ==="
-          ls -la docs/outputs || true
-          test -f docs/outputs/astra4_chart.png || \
-          test -f docs/outputs/astra4_history.csv || \
-          test -f docs/outputs/astra4_latest.txt || \
-          test -f docs/outputs/astra4_intraday.png
-
-      # ======= 成果物アップロード（デバッグ用） =======
-      - name: Upload artifacts (debug)
-        uses: actions/upload-artifact@v4
-        with:
-          name: astra4-outputs
-          path: docs/outputs/*
-
-      # ======= リポジトリにコミットしてPush =======
+        run: python src/astra4_intraday.py
       - name: Commit and push results
         run: |
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add docs/outputs/* || true
-          echo "=== git status ==="
-          git status
           if ! git diff --cached --quiet; then
-            git commit -m "Auto update: outputs $(date -u '+%Y-%m-%d %H:%M:%SZ')"
+            git commit -m "Auto update: ASTRA4 outputs"
             git push
-            echo "pushed ✅"
           else
-            echo "No changes to commit."
+            echo "No changes."
           fi
