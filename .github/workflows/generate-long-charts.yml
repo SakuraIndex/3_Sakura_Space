@@ -31,17 +31,17 @@ jobs:
           REPO_LC="$(echo "$REPO_RAW" | tr '[:upper:]' '[:lower:]')"
 
           case "$REPO_LC" in
-            3_sakura_space) KEY="astra4";    TZ="Asia/Tokyo";        S="09:00"; E="15:30" ;;
-            s-coin-)        KEY="scoin_plus"; TZ="Asia/Tokyo";        S="09:00"; E="15:30" ;;
-            r-bank9)        KEY="rbank9";     TZ="Asia/Tokyo";        S="09:00"; E="15:30" ;;
-            ain-10)         KEY="ain10";      TZ="America/New_York"; S="09:30"; E="16:00" ;;
-            *)              KEY="index";      TZ="UTC";               S="00:00"; E="23:59" ;;
+            3_sakura_space) KEY="astra4"; TZ="Asia/Tokyo"; S="09:00"; E="15:30" ;;
+            s-coin-)        KEY="scoin_plus"; TZ="Asia/Tokyo"; S="09:00"; E="15:30" ;;
+            r-bank9)        KEY="rbank9"; TZ="Asia/Tokyo"; S="09:00"; E="15:30" ;;
+            ain-10)         KEY="ain10"; TZ="America/New_York"; S="09:30"; E="16:00" ;;
+            *)              KEY="index"; TZ="UTC"; S="00:00"; E="23:59" ;;
           esac
 
           echo "INDEX_KEY=$KEY" | tee -a "$GITHUB_ENV"
-          echo "market_tz=$TZ"   >> "$GITHUB_OUTPUT"
-          echo "session_start=$S" >> "$GITHUB_OUTPUT"
-          echo "session_end=$E"   >> "$GITHUB_OUTPUT"
+          echo "market_tz=$TZ"       >> "$GITHUB_OUTPUT"
+          echo "session_start=$S"    >> "$GITHUB_OUTPUT"
+          echo "session_end=$E"      >> "$GITHUB_OUTPUT"
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -73,14 +73,53 @@ jobs:
       - name: Generate long-term charts
         env:
           INDEX_KEY: ${{ env.INDEX_KEY }}
-          CLAMP_SESSION: "true"
           MARKET_TZ: ${{ steps.resolve.outputs.market_tz }}
           SESSION_START: ${{ steps.resolve.outputs.session_start }}
           SESSION_END: ${{ steps.resolve.outputs.session_end }}
-        shell: bash
         run: |
           set -euo pipefail
           python scripts/long_charts.py
+
+      # ── 古い接頭辞を新接頭辞に置換 ──
+      - name: Normalize legacy filenames (rename old prefixes)
+        env:
+          INDEX_KEY: ${{ env.INDEX_KEY }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          OUTDIR="docs/outputs"
+          shopt -s nullglob
+
+          normalize_prefix() {
+            local wrong="$1"; local right="$2"
+            for f in "$OUTDIR"/${wrong}*; do
+              base="$(basename "$f")"
+              new="$OUTDIR/${base/$wrong/$right}"
+              if [ "$f" != "$new" ]; then
+                if [ -e "$new" ]; then
+                  rm -f "$f" && echo "removed duplicate: $base"
+                else
+                  mv -f "$f" "$new" && echo "renamed: $base → $(basename "$new")"
+                fi
+              fi
+            done
+          }
+
+          case "$INDEX_KEY" in
+            astra4)
+              normalize_prefix "3_sakura_space_" "astra4_"
+              ;;
+            rbank9)
+              normalize_prefix "r_bank9_" "rbank9_"
+              ;;
+            ain10)
+              normalize_prefix "ain_10_" "ain10_"
+              ;;
+            scoin_plus)
+              normalize_prefix "s_coin__" "scoin_plus_"
+              normalize_prefix "s_coin_"  "scoin_plus_"
+              ;;
+          esac
 
       - name: Sanity check - filenames prefix
         env:
@@ -93,34 +132,24 @@ jobs:
           shopt -s nullglob
           for f in "$OUTDIR"/*; do
             base="$(basename "$f")"
-            if [[ "$base" != "${INDEX_KEY}_"* ]]; then
-              echo "❌ prefix mismatch: $base"
-              mismatched=1
-            fi
+            case "$base" in
+              README.md|_last_run.txt) continue ;;
+            esac
+            [[ "$base" == "${INDEX_KEY}_"* ]] || { echo "❌ prefix mismatch: $base"; mismatched=1; }
           done
-          if [ $mismatched -ne 0 ]; then
-            echo "Prefix mismatch (INDEX_KEY=$INDEX_KEY)"
-            exit 1
-          fi
+          [ $mismatched -eq 0 ] || { echo "Prefix mismatch (INDEX_KEY=$INDEX_KEY)"; exit 1; }
           echo "✅ Prefix check passed."
 
-      - name: List outputs
-        shell: bash
-        run: |
-          set -euo pipefail
-          echo "=== outputs ==="
-          ls -lah docs/outputs || true
-
-      - name: Commit charts if changed
+      - name: Commit stats if changed
         shell: bash
         run: |
           set -euo pipefail
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add docs/outputs/*.png docs/outputs/*history.csv docs/outputs/*_post_intraday.txt docs/outputs/*_stats.json 2>/dev/null || true
+          git add docs/outputs/*_stats.json docs/outputs/*_post_intraday.txt 2>/dev/null || true
           if git diff --cached --quiet; then
             echo "No changes to commit."
           else
-            git commit -m "chore(charts): update long-term charts (1d/7d/1m/1y) & stats"
+            git commit -m "chore(charts): update stats & markers"
             git push
           fi
