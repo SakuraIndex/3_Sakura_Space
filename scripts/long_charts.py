@@ -1,173 +1,160 @@
-name: Generate long-term charts
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 
-on:
-  workflow_dispatch:
+"""
+桜Index: intraday変化率を算出（PNGは触らない）
+- intraday.csv を元に {key}_stats.json / {key}_post_intraday.txt を更新
+- ％系列(pct)は前半/後半の中央値差でロバストに算出（外れ値・ゼロ始値対策）
+- ASTRA4 は fraction（小数リターン）として扱う
+"""
 
-permissions:
-  contents: write
+import os, json
+from datetime import datetime, time as dtime
+from pathlib import Path
+from typing import List, Tuple
+import numpy as np
+import pandas as pd
 
-concurrency:
-  group: long-charts-${{ github.ref }}
-  cancel-in-progress: false
+OUTDIR = Path("docs/outputs")
+OUTDIR.mkdir(parents=True, exist_ok=True)
 
-jobs:
-  build:
-    runs-on: ubuntu-latest
-    timeout-minutes: 12
+INDEX_KEY = os.environ.get("INDEX_KEY", "index").lower()   # 期待値: "astra4"
+MARKET_TZ = os.environ.get("MARKET_TZ", "Asia/Tokyo")
+SESSION_START = os.environ.get("SESSION_START", "09:00")
+SESSION_END   = os.environ.get("SESSION_END",   "15:30")
 
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          persist-credentials: true
+# 指数ごとのスケール固定
+SCALE_MAP = {
+    "scoin_plus": "price",
+    "rbank9": "pct",
+    "ain10": "pct",
+    "astra4": "fraction",     # 小数 → %換算
+}
 
-      - name: Resolve INDEX_KEY & market
-        id: resolve
-        shell: bash
-        run: |
-          set -euo pipefail
-          REPO_RAW="${GITHUB_REPOSITORY##*/}"
-          REPO_LC="$(echo "$REPO_RAW" | tr '[:upper:]' '[:lower:]')"
+# ======== 読み込みユーティリティ ========
+def _read_csv(path: Path) -> pd.DataFrame:
+    if not path.exists():
+        raise FileNotFoundError(f"{path} not found")
+    df = pd.read_csv(path)
+    tcols = [c for c in df.columns if c.lower() in ("datetime", "timestamp", "time", "日時", "date")]
+    if not tcols:
+        raise ValueError(f"{path} に日時列がありません")
+    tcol = tcols[0]
+    vcol = [c for c in df.columns if c.lower() not in ("datetime", "timestamp", "time", "日時", "date")][-1]
 
-          case "$REPO_LC" in
-            3_sakura_space) KEY="astra4";    TZ="Asia/Tokyo";        S="09:00"; E="15:30" ;;
-            s-coin-)        KEY="scoin_plus"; TZ="Asia/Tokyo";        S="09:00"; E="15:30" ;;
-            r-bank9)        KEY="rbank9";     TZ="Asia/Tokyo";        S="09:00"; E="15:30" ;;
-            ain-10)         KEY="ain10";      TZ="America/New_York"; S="09:30"; E="16:00" ;;
-            *)              KEY="index";      TZ="UTC";               S="00:00"; E="23:59" ;;
-          esac
+    df["ts_utc"] = pd.to_datetime(df[tcol], utc=True, errors="coerce")
+    df["value"]  = pd.to_numeric(df[vcol], errors="coerce")
+    df = df.dropna(subset=["ts_utc", "value"]).sort_values("ts_utc").reset_index(drop=True)
+    return df[["ts_utc", "value"]]
 
-          echo "INDEX_KEY=$KEY" | tee -a "$GITHUB_ENV"
-          echo "market_tz=$TZ"       >> "$GITHUB_OUTPUT"
-          echo "session_start=$S"    >> "$GITHUB_OUTPUT"
-          echo "session_end=$E"      >> "$GITHUB_OUTPUT"
+def _to_market_tz(ts_utc: pd.Series) -> pd.Series:
+    return ts_utc.dt.tz_convert(MARKET_TZ)
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
+def _session_bounds(ts_local: pd.Series) -> Tuple[pd.Timestamp, pd.Timestamp]:
+    if ts_local.empty:
+        now_local = pd.Timestamp.utcnow()
+        if now_local.tzinfo is None:
+            now_local = now_local.tz_localize("UTC").tz_convert(MARKET_TZ)
+        else:
+            now_local = now_local.tz_convert(MARKET_TZ)
+        base_date = now_local.date()
+    else:
+        base_date = ts_local.iloc[-1].date()
 
-      - name: Cache pip
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
-          restore-keys: |
-            ${{ runner.os }}-pip-
+    s_h, s_m = map(int, SESSION_START.split(":"))
+    e_h, e_m = map(int, SESSION_END.split(":"))
+    start = pd.Timestamp(datetime.combine(base_date, dtime(s_h, s_m))).tz_localize(MARKET_TZ)
+    end   = pd.Timestamp(datetime.combine(base_date, dtime(e_h, e_m))).tz_localize(MARKET_TZ)
+    if end <= start:
+        end += pd.Timedelta(days=1)
+    return start, end
 
-      - name: Install deps
-        shell: bash
-        run: |
-          set -euo pipefail
-          python -V
-          pip install --upgrade pip
-          pip install -r requirements.txt
+def _clamp_today(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty:
+        return df
+    ts_local = _to_market_tz(df["ts_utc"])
+    start, end = _session_bounds(ts_local)
+    mask = (ts_local >= start) & (ts_local <= end)
+    out = df.loc[mask].copy()
+    if out.empty:
+        last_day = ts_local.dt.date.iloc[-1]
+        out = df.loc[ts_local.dt.date == last_day].copy()
+    return out
 
-      - name: Clear pycache
-        shell: bash
-        run: |
-          set -euo pipefail
-          rm -rf scripts/__pycache__ || true
+# ======== 変化率の計算 ========
+def _robust_open_close_pct(values: np.ndarray) -> Tuple[float, float]:
+    """％系列専用：前半/後半ブロックの中央値を open/close とみなす"""
+    n = len(values)
+    if n < 2:
+        return np.nan, np.nan
+    k = max(5, int(n * 0.1))
+    head = values[:k]
+    tail = values[-k:]
 
-      - name: Generate long-term charts (stats only; no PNG overwrite)
-        env:
-          INDEX_KEY: ${{ env.INDEX_KEY }}
-          MARKET_TZ: ${{ steps.resolve.outputs.market_tz }}
-          SESSION_START: ${{ steps.resolve.outputs.session_start }}
-          SESSION_END: ${{ steps.resolve.outputs.session_end }}
-          CLAMP_SESSION: "true"
-        shell: bash
-        run: |
-          set -euo pipefail
-          python scripts/long_charts.py
+    def _rm_outliers(x: np.ndarray) -> np.ndarray:
+        x = x[np.isfinite(x)]
+        if len(x) == 0:
+            return x
+        q1, q3 = np.percentile(x, [25, 75])
+        iqr = q3 - q1
+        lo, hi = q1 - 1.5 * iqr, q3 + 1.5 * iqr
+        return x[(x >= lo) & (x <= hi)]
 
-      # ── ここで旧接頭辞を新接頭辞へ正規化 ────────────────────────────────
-      - name: Normalize legacy filenames (rename old prefixes)
-        env:
-          INDEX_KEY: ${{ env.INDEX_KEY }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          OUTDIR="docs/outputs"
-          shopt -s nullglob
+    head = _rm_outliers(head)
+    tail = _rm_outliers(tail)
+    if len(head) == 0 or len(tail) == 0:
+        return np.nan, np.nan
 
-          normalize_prefix() {
-            local wrong="$1"; local right="$2"
-            for f in "$OUTDIR"/${wrong}*; do
-              base="$(basename "$f")"
-              new="$OUTDIR/${base/$wrong/$right}"
-              if [ "$f" != "$new" ]; then
-                if [ -e "$new" ]; then
-                  rm -f "$f" && echo "remove legacy duplicate: $base"
-                else
-                  mv -f "$f" "$new" && echo "rename: $base -> $(basename "$new")"
-                fi
-              fi
-            done
-          }
+    return float(np.median(head)), float(np.median(tail))
 
-          case "$INDEX_KEY" in
-            ain10)
-              normalize_prefix "ain_10_" "ain10_"
-              ;;
-            rbank9)
-              normalize_prefix "r_bank9_" "rbank9_"
-              ;;
-            scoin_plus)
-              normalize_prefix "s_coin__" "scoin_plus_"
-              normalize_prefix "s_coin_"  "scoin_plus_"
-              ;;
-            astra4)
-              normalize_prefix "3_sakura_space_" "astra4_"
-              ;;
-          esac
+def _compute_change(values: List[float], scale: str) -> float:
+    arr = np.array(values, dtype=float)
+    arr = arr[np.isfinite(arr)]
+    if len(arr) < 2:
+        return 0.0
 
-      # ── メタファイルを除外して接頭辞チェック ────────────────────────────────
-      - name: Sanity check - filenames prefix
-        env:
-          INDEX_KEY: ${{ env.INDEX_KEY }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          OUTDIR="docs/outputs"
-          mismatched=0
-          shopt -s nullglob
+    if scale == "pct":
+        o, c = _robust_open_close_pct(arr)
+        pct = (arr[-1] - arr[0]) if (np.isnan(o) or np.isnan(c)) else (c - o)
+        pct = float(np.clip(pct, -30.0, 30.0))   # ガードレール
+        return round(pct, 6)
 
-          for f in "$OUTDIR"/*; do
-            base="$(basename "$f")"
-            case "$base" in
-              README.md|_last_run.txt) continue ;;   # 除外
-            esac
-            if [[ "$base" != "${INDEX_KEY}_"* ]]; then
-              echo "❌ prefix mismatch: $base"
-              mismatched=1
-            fi
-          done
+    # price / fraction
+    start, end = arr[0], arr[-1]
+    if abs(start) < 1e-6:
+        start = float(np.median(arr[:max(5, len(arr)//10)]))
 
-          if [ $mismatched -ne 0 ]; then
-            echo "Prefix mismatch (INDEX_KEY=$INDEX_KEY)"
-            exit 1
-          fi
-          echo "✅ Prefix check passed."
+    if scale == "price":
+        pct = (end / start - 1.0) * 100.0
+        pct = float(np.clip(pct, -50.0, 50.0))
+    else:  # fraction
+        pct = (end - start) * 100.0
+        pct = float(np.clip(pct, -50.0, 50.0))
+    return round(pct, 6)
 
-      - name: List outputs
-        shell: bash
-        run: |
-          set -euo pipefail
-          echo "=== outputs ==="
-          ls -lah docs/outputs || true
+# ======== メイン ========
+def main():
+    df = _read_csv(OUTDIR / f"{INDEX_KEY}_intraday.csv")
+    df = _clamp_today(df)
 
-      - name: Commit charts if changed
-        shell: bash
-        run: |
-          set -euo pipefail
-          git config user.name  "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add docs/outputs/*_stats.json docs/outputs/*_post_intraday.txt 2>/dev/null || true
-          if git diff --cached --quiet; then
-            echo "No changes to commit."
-          else
-            git commit -m "chore(charts): update stats & markers"
-            git push
-          fi
+    scale = SCALE_MAP.get(INDEX_KEY, "pct")
+    pct_1d = _compute_change(df["value"].tolist(), scale)
+
+    stats = {
+        "index_key": INDEX_KEY,
+        "pct_1d": pct_1d,
+        "scale": scale,
+        "updated_at": datetime.utcnow().isoformat() + "Z",
+    }
+    (OUTDIR / f"{INDEX_KEY}_stats.json").write_text(json.dumps(stats, ensure_ascii=False), encoding="utf-8")
+
+    sign = "+" if pct_1d >= 0 else ""
+    (OUTDIR / f"{INDEX_KEY}_post_intraday.txt").write_text(
+        f"{INDEX_KEY.upper()} 1d: {sign}{pct_1d:.2f}%",
+        encoding="utf-8"
+    )
+
+    print(f"[{INDEX_KEY}] pct_1d={pct_1d:.3f} (scale={scale})")
+
+if __name__ == "__main__":
+    main()
