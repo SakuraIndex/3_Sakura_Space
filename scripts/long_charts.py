@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-ASTRA4 charts + stats  (fraction→pct 統一, dark theme)
+ASTRA4 charts + stats  (fraction→pct 統一, dark theme, dynamic line color)
 """
 from pathlib import Path
 import json
@@ -27,6 +27,8 @@ DARK_AX = "#0b0c10"
 FG_TEXT = "#e7ecf1"
 GRID    = "#2a2e3a"
 RED     = "#ff6b6b"
+GREEN   = "#28e07c"
+FLAT    = "#9aa3af"  # ゼロ近傍・判定不能のとき
 
 def _apply(ax, title: str) -> None:
     fig = ax.figure
@@ -43,10 +45,39 @@ def _apply(ax, title: str) -> None:
     ax.set_xlabel("Time", color=FG_TEXT, fontsize=10)
     ax.set_ylabel("Index / Value", color=FG_TEXT, fontsize=10)
 
-def _save(df: pd.DataFrame, col: str, out_png: Path, title: str) -> None:
+def _trend_color(series: pd.Series, mode: str) -> str:
+    """
+    線色の判定:
+      - mode="intraday": 末尾の値の符号で (+)緑 / (-)赤 / 0はFLAT
+      - mode="window"  : 期間の純変化 (last - first) で判定
+    """
+    s = pd.to_numeric(series, errors="coerce").dropna()
+    if s.empty:
+        return FLAT
+
+    if mode == "intraday":
+        last = s.iloc[-1]
+        if last > 0:
+            return GREEN
+        if last < 0:
+            return RED
+        return FLAT
+
+    # window（7d/1m/1y）は first/last の有効値で純変化を見る
+    first = s.iloc[0]
+    last  = s.iloc[-1]
+    delta = last - first
+    if delta > 0:
+        return GREEN
+    if delta < 0:
+        return RED
+    return FLAT
+
+def _save(df: pd.DataFrame, col: str, out_png: Path, title: str, mode: str) -> None:
     fig, ax = plt.subplots()
     _apply(ax, title)
-    ax.plot(df.index, df[col], color=RED, linewidth=1.6)
+    color = _trend_color(df[col], mode=mode)
+    ax.plot(df.index, df[col], color=color, linewidth=1.6)
     fig.savefig(out_png, bbox_inches="tight", facecolor=fig.get_facecolor())
     plt.close(fig)
 
@@ -61,7 +92,7 @@ def _pick_index_column(df: pd.DataFrame) -> str:
     def norm(s: str) -> str:
         return s.strip().lower().replace("_", "").replace("-", "")
     candidates = {
-        "astra4", "astra4mean", "astra4_index", "spaceindex", "sakura4"
+        "astra4", "astra4mean", "astra4index", "spaceindex", "sakura4"
     }
     ncols = {c: norm(c) for c in df.columns}
     for c, nc in ncols.items():
@@ -95,10 +126,13 @@ def gen_pngs() -> None:
     tail_1d = df.tail(1000)
     tail_7d = df.tail(7 * 1000)
 
-    _save(tail_1d, col, OUTDIR / f"{INDEX_KEY}_1d.png", f"{INDEX_KEY.upper()} (1d)")
-    _save(tail_7d, col, OUTDIR / f"{INDEX_KEY}_7d.png", f"{INDEX_KEY.upper()} (7d)")
-    _save(df,      col, OUTDIR / f"{INDEX_KEY}_1m.png", f"{INDEX_KEY.upper()} (1m)")
-    _save(df,      col, OUTDIR / f"{INDEX_KEY}_1y.png", f"{INDEX_KEY.upper()} (1y)")
+    # 1d は「その時点の fraction（= 当日リターン）」→ 最後の符号で色判定
+    _save(tail_1d, col, OUTDIR / f"{INDEX_KEY}_1d.png", f"{INDEX_KEY.upper()} (1d)", mode="intraday")
+
+    # 7d/1m/1y は純変化で色判定（上げ → 緑、下げ → 赤）
+    _save(tail_7d, col, OUTDIR / f"{INDEX_KEY}_7d.png", f"{INDEX_KEY.upper()} (7d)", mode="window")
+    _save(df,      col, OUTDIR / f"{INDEX_KEY}_1m.png", f"{INDEX_KEY.upper()} (1m)", mode="window")
+    _save(df,      col, OUTDIR / f"{INDEX_KEY}_1y.png", f"{INDEX_KEY.upper()} (1y)", mode="window")
 
 # ------------------------
 # stats (pct) + marker
@@ -118,14 +152,14 @@ def write_stats_and_marker() -> None:
 
     pct = None
     if len(df.index) > 0:
-        last = df[col].iloc[-1]
-        if pd.notna(last):
-            pct = float(last) * 100.0
+        last = pd.to_numeric(df[col], errors="coerce").dropna()
+        if not last.empty:
+            pct = float(last.iloc[-1]) * 100.0
 
     payload = {
         "index_key": INDEX_KEY,
         "pct_1d": None if pct is None else round(pct, 6),
-        "scale": "pct",                 # ← サイト仕様に合わせて百分率で固定
+        "scale": "pct",
         "updated_at": _now_utc_iso(),
     }
     (OUTDIR / f"{INDEX_KEY}_stats.json").write_text(
