@@ -29,7 +29,7 @@ def _apply(ax, title):
     ax.set_facecolor(DARK_AX)
     for sp in ax.spines.values():
         sp.set_color(GRID)
-    ax.grid(color=GRID, alpha=0.6, linewidth=0.8)  # ちょい明るめ
+    ax.grid(color=GRID, alpha=0.6, linewidth=0.8)
     ax.tick_params(colors=FG_TEXT, labelsize=10)
     ax.yaxis.get_major_formatter().set_scientific(False)
     ax.set_title(title, color=FG_TEXT, fontsize=12)
@@ -62,19 +62,17 @@ def gen_pngs():
 
 def write_stats():
     """
-    ASTRA4 は intraday の値が fraction（-0.054 ≒ -5.4%）。
-    → 1日騰落率[%] = last_value * 100
+    ASTRA4 の intraday は fraction（-0.054 ≒ -5.4%）。
+    → 騰落率[%] = last_value * 100
     """
     df = _load_df()
     col = df.columns[-1]
-    pct = None
-    if len(df):
-        pct = float(df[col].iloc[-1]) * 100.0
+    pct = float(df[col].iloc[-1]) * 100.0 if len(df) else None
 
     payload = {
         "index_key": INDEX_KEY,
         "pct_1d": None if pct is None else pct,
-        "scale": "pct",  # ここは最終的に % を入れているので "pct"
+        "scale": "pct",  # ここで最終的に%にしている
         "updated_at": pd.Timestamp.utcnow().isoformat(timespec="seconds") + "Z",
     }
     (OUTDIR / f"{INDEX_KEY}_stats.json").write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
