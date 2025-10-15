@@ -1,4 +1,4 @@
-name: Generate long-term charts
+name: Generate long-term charts (1d/7d/1m/1y + stats)
 
 on:
   workflow_dispatch:
@@ -13,7 +13,7 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 12
+    timeout-minutes: 15
 
     steps:
       - name: Checkout
@@ -79,9 +79,11 @@ jobs:
         run: |
           set -euo pipefail
           python scripts/long_charts.py
+          echo "---- After generation ----"
+          ls -lh docs/outputs || true
 
-      # ── 古い接頭辞を新接頭辞に置換 ──
-      - name: Normalize legacy filenames (rename old prefixes)
+      # ── 旧接頭辞の正規化 ────────────────────────────────
+      - name: Normalize legacy filenames
         env:
           INDEX_KEY: ${{ env.INDEX_KEY }}
         shell: bash
@@ -121,6 +123,7 @@ jobs:
               ;;
           esac
 
+      # ── プレフィックス整合性チェック ────────────────────────────────
       - name: Sanity check - filenames prefix
         env:
           INDEX_KEY: ${{ env.INDEX_KEY }}
@@ -140,16 +143,28 @@ jobs:
           [ $mismatched -eq 0 ] || { echo "Prefix mismatch (INDEX_KEY=$INDEX_KEY)"; exit 1; }
           echo "✅ Prefix check passed."
 
-      - name: Commit stats if changed
+      # ── コミット & Push（PNG / CSV / JSON / marker すべて） ────────────────────────────────
+      - name: Commit charts if changed
         shell: bash
         run: |
           set -euo pipefail
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          # すべての出力ファイルを確実に add
+          git add docs/outputs/${{ env.INDEX_KEY }}_1d.png 2>/dev/null || true
+          git add docs/outputs/${{ env.INDEX_KEY }}_7d.png 2>/dev/null || true
+          git add docs/outputs/${{ env.INDEX_KEY }}_1m.png 2>/dev/null || true
+          git add docs/outputs/${{ env.INDEX_KEY }}_1y.png 2>/dev/null || true
+          git add docs/outputs/${{ env.INDEX_KEY }}_1d.csv 2>/dev/null || true
+          git add docs/outputs/${{ env.INDEX_KEY }}_7d.csv 2>/dev/null || true
+          git add docs/outputs/${{ env.INDEX_KEY }}_1m.csv 2>/dev/null || true
+          git add docs/outputs/${{ env.INDEX_KEY }}_1y.csv 2>/dev/null || true
           git add docs/outputs/*_stats.json docs/outputs/*_post_intraday.txt 2>/dev/null || true
+
           if git diff --cached --quiet; then
             echo "No changes to commit."
           else
-            git commit -m "chore(charts): update stats & markers"
+            git commit -m "chore(charts): update ${{ env.INDEX_KEY }} 1d/7d/1m/1y & stats"
             git push
           fi
