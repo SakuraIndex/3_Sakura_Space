@@ -1,10 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-ASTRA4 charts + stats
-- 1d も 7d/1m/1y も「指数レベル（level）」をそのまま描画
-- 騰落表示は level の“差分”で統一（%にしない）
-- ダークテーマ、動的ライン色
+ASTRA4 charts + stats  (level + percent side-by-side, dark theme)
 """
 from pathlib import Path
 import json
@@ -31,7 +28,7 @@ FG_TEXT = "#e7ecf1"
 GRID    = "#2a2e3a"
 RED     = "#ff6b6b"
 GREEN   = "#28e07c"
-FLAT    = "#9aa3af"  # ゼロ近傍・判定不能
+FLAT    = "#9aa3af"  # ゼロ近傍・判定不能のとき
 
 def _apply(ax, title: str) -> None:
     fig = ax.figure
@@ -41,7 +38,7 @@ def _apply(ax, title: str) -> None:
     ax.set_facecolor(DARK_AX)
     for sp in ax.spines.values():
         sp.set_color(GRID)
-    ax.grid(color=GRID, alpha=0.4, linewidth=0.8)
+    ax.grid(color=GRID, alpha=0.25, linewidth=0.8)
     ax.tick_params(colors=FG_TEXT, labelsize=10)
     ax.yaxis.get_major_formatter().set_scientific(False)
     ax.set_title(title, color=FG_TEXT, fontsize=12)
@@ -51,13 +48,24 @@ def _apply(ax, title: str) -> None:
 def _trend_color(series: pd.Series, mode: str) -> str:
     """
     線色の判定:
-      - mode="intraday": 最後と最初の“差分”（last-first）で判定
-      - mode="window"  : 期間の純変化（last-first）
+      - mode="intraday": 末尾の値の符号で (+)緑 / (-)赤 / 0はFLAT
+      - mode="window"  : 期間の純変化 (last - first) で判定
     """
     s = pd.to_numeric(series, errors="coerce").dropna()
-    if len(s) < 2:
+    if s.empty:
         return FLAT
-    delta = float(s.iloc[-1]) - float(s.iloc[0])
+
+    if mode == "intraday":
+        last = s.iloc[-1]
+        if last > 0:
+            return GREEN
+        if last < 0:
+            return RED
+        return FLAT
+
+    first = s.iloc[0]
+    last  = s.iloc[-1]
+    delta = last - first
     if delta > 0:
         return GREEN
     if delta < 0:
@@ -65,12 +73,10 @@ def _trend_color(series: pd.Series, mode: str) -> str:
     return FLAT
 
 def _save(df: pd.DataFrame, col: str, out_png: Path, title: str, mode: str) -> None:
-    if df.empty:
-        return
     fig, ax = plt.subplots()
     _apply(ax, title)
     color = _trend_color(df[col], mode=mode)
-    ax.plot(df.index, df[col], color=color, linewidth=1.6)
+    ax.plot(df.index, df[col], color=color, linewidth=1.8)
     fig.savefig(out_png, bbox_inches="tight", facecolor=fig.get_facecolor())
     plt.close(fig)
 
@@ -79,22 +85,20 @@ def _save(df: pd.DataFrame, col: str, out_png: Path, title: str, mode: str) -> N
 # ------------------------
 def _pick_index_column(df: pd.DataFrame) -> str:
     """
-    ASTRA4 本体列を推定。既知が無ければ最後の列。
+    ASTRA4 本体列を推定。既知の候補が無ければ最後の列。
     """
     def norm(s: str) -> str:
         return s.strip().lower().replace("_", "").replace("-", "")
-    candidates = {
-        "astra4", "astra4mean", "astra4index", "spaceindex", "sakura4"
-    }
+    candidates = {"astra4", "astra4mean", "astra4index", "spaceindex", "sakura4"}
     for c in df.columns:
         if norm(c) in candidates:
             return c
     return df.columns[-1]
 
-def _load_df_any() -> pd.DataFrame:
+def _load_df() -> pd.DataFrame:
     """
-    intraday があれば intraday 優先。無ければ history。
-    先頭列を DatetimeIndex に、数値列へ変換して NA 行を落とす。
+    intraday があれば intraday 優先、無ければ history。
+    先頭列を DatetimeIndex に、数値化・NA 除去。
     """
     if INTRADAY_CSV.exists():
         df = pd.read_csv(INTRADAY_CSV, parse_dates=[0], index_col=0)
@@ -107,81 +111,70 @@ def _load_df_any() -> pd.DataFrame:
     df = df.dropna(how="all")
     return df
 
-def _load_df_intraday() -> pd.DataFrame | None:
-    if not INTRADAY_CSV.exists():
-        return None
-    df = pd.read_csv(INTRADAY_CSV, parse_dates=[0], index_col=0)
-    for c in list(df.columns):
-        df[c] = pd.to_numeric(df[c], errors="coerce")
-    return df.dropna(how="all")
+# ------------------------
+# basis (first/last) & deltas
+# ------------------------
+def _first_last_valid(series: pd.Series):
+    """ 有効な最初と最後の (timestamp, value) を返す """
+    s = pd.to_numeric(series, errors="coerce").dropna()
+    if s.empty:
+        return None, None, None, None
+    first_ts, last_ts = s.index[0], s.index[-1]
+    first_v,  last_v  = float(s.iloc[0]), float(s.iloc[-1])
+    return first_ts, last_ts, first_v, last_v
+
+def _delta_level_and_pct(first_v: float, last_v: float, eps: float = 1e-9):
+    """ level差と％差を同時に計算（firstが極小なら％はNone） """
+    delta_level = last_v - first_v
+    delta_pct = None if abs(first_v) < eps else (last_v / first_v - 1.0) * 100.0
+    return delta_level, delta_pct
 
 # ------------------------
 # chart generation
 # ------------------------
 def gen_pngs() -> None:
-    df_all = _load_df_any()
-    col = _pick_index_column(df_all)
+    df = _load_df()
+    col = _pick_index_column(df)
 
-    # 1d: intraday があればそれを、無ければ直近 1d 相当の tail
-    df_1d = _load_df_intraday()
-    if df_1d is None:
-        df_1d = df_all.tail(1000)
+    tail_1d = df.tail(1000)
+    tail_7d = df.tail(7 * 1000)
 
-    # 7d は tail で簡易に（実データ密度は指数に依存）
-    df_7d = df_all.tail(7 * 1000)
+    # 1d: series は「level」をそのまま描画（末尾の符号で色判定）
+    _save(tail_1d, col, OUTDIR / f"{INDEX_KEY}_1d.png", f"{INDEX_KEY.upper()} (1d level)", mode="intraday")
 
-    _save(df_1d, col, OUTDIR / f"{INDEX_KEY}_1d.png", f"{INDEX_KEY.upper()} (1d level)", mode="intraday")
-    _save(df_7d, col, OUTDIR / f"{INDEX_KEY}_7d.png", f"{INDEX_KEY.upper()} (7d)", mode="window")
-    _save(df_all, col, OUTDIR / f"{INDEX_KEY}_1m.png", f"{INDEX_KEY.upper()} (1m)", mode="window")
-    _save(df_all, col, OUTDIR / f"{INDEX_KEY}_1y.png", f"{INDEX_KEY.upper()} (1y)", mode="window")
+    # 7d/1m/1y: 期間の純変化で色判定
+    _save(tail_7d, col, OUTDIR / f"{INDEX_KEY}_7d.png", f"{INDEX_KEY.upper()} (7d level)", mode="window")
+    _save(df,      col, OUTDIR / f"{INDEX_KEY}_1m.png", f"{INDEX_KEY.upper()} (1m level)", mode="window")
+    _save(df,      col, OUTDIR / f"{INDEX_KEY}_1y.png", f"{INDEX_KEY.upper()} (1y level)", mode="window")
 
 # ------------------------
-# stats (level) + marker
+# stats (level + percent) + marker
 # ------------------------
 def _now_utc_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
 
-def _first_valid_and_last(s: pd.Series) -> tuple[pd.Timestamp|None, float|None, pd.Timestamp|None, float|None]:
-    s_num = pd.to_numeric(s, errors="coerce")
-    valid = s_num.dropna()
-    if valid.empty:
-        return None, None, None, None
-    first_ts = valid.index[0]
-    last_ts  = valid.index[-1]
-    return first_ts, float(valid.iloc[0]), last_ts, float(valid.iloc[-1])
-
 def write_stats_and_marker() -> None:
     """
-    1d の変化量は「intraday の最初の有効値 → 最後の有効値」の level 差分。
-    intraday が無ければ history の tail で代替。
-    JSON: {"pct_1d": null, "delta_level": <float>, "scale": "level"}
-    TXT : "ASTRA4 1d: Δ=+0.001234 (level) (basis first-row valid=...->...)"
+    出力方針:
+      - チャートは「level」を描画
+      - 日中の1dサマリは基準=当該CSVの最初の有効値
+      - JSON:  delta_level と pct_1d の両方を格納（pctはfirst≈0なら null）
+      - TXT :  Δ=xxx (level), Δ%=yyy% を併記。基準時刻レンジも明記
     """
-    # まず intraday を優先
-    df_intra = _load_df_intraday()
-    df_any   = _load_df_any()
-    col      = _pick_index_column(df_any)
+    df  = _load_df()
+    col = _pick_index_column(df)
 
-    basis_from, basis_val, last_ts, last_val = (None, None, None, None)
+    first_ts, last_ts, first_v, last_v = _first_last_valid(df[col])
 
-    if df_intra is not None and not df_intra.empty:
-        fts, fv, lts, lv = _first_valid_and_last(df_intra[col])
-        basis_from, basis_val, last_ts, last_val = fts, fv, lts, lv
+    delta_level = None
+    delta_pct   = None
+    if first_ts is not None:
+        delta_level, delta_pct = _delta_level_and_pct(first_v, last_v)
 
-    # intraday が不十分なら全体 df で代替
-    if basis_val is None or last_val is None:
-        fts, fv, lts, lv = _first_valid_and_last(df_any[col])
-        basis_from, basis_val, last_ts, last_val = fts, fv, lts, lv
-
-    delta = None
-    if basis_val is not None and last_val is not None:
-        delta = last_val - basis_val
-
-    # JSON（% は使わない）
     payload = {
         "index_key": INDEX_KEY,
-        "pct_1d": None,                      # ％は出さない
-        "delta_level": None if delta is None else round(delta, 6),
+        "pct_1d": None if delta_pct is None else round(float(delta_pct), 6),
+        "delta_level": None if delta_level is None else round(float(delta_level), 6),
         "scale": "level",
         "updated_at": _now_utc_iso(),
     }
@@ -189,14 +182,14 @@ def write_stats_and_marker() -> None:
         json.dumps(payload, ensure_ascii=False), encoding="utf-8"
     )
 
-    # TXT マーカー
     marker = OUTDIR / f"{INDEX_KEY}_post_intraday.txt"
-    if delta is None or basis_from is None or last_ts is None:
+    if first_ts is None:
         marker.write_text(f"{INDEX_KEY.upper()} 1d: N/A (level)\n", encoding="utf-8")
     else:
+        pct_str = "N/A" if delta_pct is None else f"{delta_pct:+.2f}%"
         marker.write_text(
-            f"{INDEX_KEY.upper()} 1d: Δ={delta:+.6f} (level) "
-            f"(basis first-row valid={basis_from.isoformat()}->{last_ts.isoformat()})\n",
+            f"{INDEX_KEY.upper()} 1d: Δ={delta_level:+.6f} (level)  Δ%={pct_str} "
+            f"(basis first-row valid={first_ts.isoformat()}->{last_ts.isoformat()})\n",
             encoding="utf-8",
         )
 
