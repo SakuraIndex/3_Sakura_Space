@@ -1,309 +1,344 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-"""
-make_intraday_post.py
-
-日本株の場中スナップショット画像（黒背景）とポスト文／統計JSONを生成します。
-- CSV:   Datetime 列 + 任意の指数列（例: "S-COIN+", "ASTRA4", "R-BANK9"...）
-- 基準:  prev_close（前日終値）/ open@HH:MM（当日寄り付き値）
-- TZ:    CSVのDatetimeがnaive→UTC想定でtz_localize("UTC")後、JSTへtz_convert
-         既にtzあり→そのままJSTへtz_convert
-- セッション: HH:MM（JST）でフィルタ（例: 09:00–15:30）
-- 出力:
-    - スナップショットPNG
-    - ポスト本文 .txt
-    - stats JSON（騰落率、基準ラベル、セッション、更新時刻）
-
-使い方（例）
-python scripts/make_intraday_post.py \
-  --index-key scoin_plus \
-  --csv docs/outputs/scoin_plus_intraday.csv \
-  --out-json docs/outputs/scoin_plus_stats.json \
-  --out-text docs/outputs/scoin_plus_post_intraday.txt \
-  --snapshot-png docs/outputs/scoin_plus_intraday.png \
-  --session-start 09:00 --session-end 15:30 \
-  --day-anchor 09:00 \
-  --basis prev_close \
-  --label S-COIN+
-"""
-
-from __future__ import annotations
 import argparse
-import json
-from dataclasses import dataclass
-from typing import Tuple
+import re
+from datetime import time as dtime
+from typing import Optional, Tuple
 
-import pandas as pd
 import numpy as np
+import pandas as pd
 import matplotlib.pyplot as plt
-from matplotlib.ticker import MaxNLocator
 
-JST = pd.Timestamp.now(tz="Asia/Tokyo").tz
 
-# ---------- CLI ----------
+# ---------------------------
+# Argparse
+# ---------------------------
 
-def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Generate intraday snapshot + post text")
-    p.add_argument("--index-key", required=True, help="識別用キー（列名推定にも使用）例: scoin_plus / astra4 / rbank9")
-    p.add_argument("--csv", required=True, help="入力CSV（Datetime列 + 指数列）")
-    p.add_argument("--out-json", required=True, help="出力 stats JSON")
-    p.add_argument("--out-text", required=True, help="出力 ポスト本文 .txt")
-    p.add_argument("--snapshot-png", required=True, help="出力 スナップショットPNG")
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        description="Generate intraday snapshot & post text from CSV."
+    )
+    p.add_argument("--index-key", required=True, help="Logical index key (e.g., scoin_plus, astra4)")
+    p.add_argument("--csv", required=True, help="Input CSV path")
+    p.add_argument("--out-json", required=True, help="Output JSON stats path")
+    p.add_argument("--out-text", required=True, help="Output post text path")
+    p.add_argument("--snapshot-png", required=True, help="Output snapshot PNG path")
+    p.add_argument("--session-start", required=True, help='Session start "HH:MM" JST')
+    p.add_argument("--session-end", required=True, help='Session end "HH:MM" JST')
+    p.add_argument("--day-anchor", required=True, help='Day anchor time for labeling "HH:MM" JST (used in title only)')
+    p.add_argument(
+        "--basis",
+        required=True,
+        help='Return basis: "prev_close" or "open@HH:MM"'
+    )
+    p.add_argument(
+        "--label",
+        default=None,
+        help="Label to use on chart & post (default: UPPER(index-key))"
+    )
+    p.add_argument(
+        "--dt-col",
+        default=None,
+        help="Datetime column name in CSV (optional; auto-detect if omitted)"
+    )
+    return p
 
-    p.add_argument("--session-start", required=True, help="JST セッション開始 HH:MM（例 09:00）")
-    p.add_argument("--session-end", required=True, help="JST セッション終了 HH:MM（例 15:30）")
-    p.add_argument("--day-anchor", required=True, help="見出し用の“日中”基準時間（ラベル用）HH:MM")
 
-    p.add_argument("--basis", required=True,
-                   help="基準ラベル（prev_close / open@HH:MM）。例: prev_close, open@09:00")
-    p.add_argument("--label", default=None,
-                   help="グラフ凡例・タイトル用ラベル（例: S-COIN+）。省略時は index-key から推定")
-    return p.parse_args()
+# ---------------------------
+# Helpers
+# ---------------------------
 
-# ---------- Data / Time helpers ----------
+def _resolve_col(cols, preferred: Optional[str] = None, fallbacks: Optional[list] = None) -> Optional[str]:
+    """Resolve a column name with case-insensitive and fallback support."""
+    cols_list = list(cols)
 
-def to_jst_index(df: pd.DataFrame, dt_col: str = "Datetime") -> pd.DataFrame:
-    """Datetime列をJSTのDatetimeIndexに変換して返す。"""
-    if dt_col not in df.columns:
-        raise ValueError(f"CSVに '{dt_col}' 列が見つかりません。")
+    if preferred:
+        # exact
+        if preferred in cols_list:
+            return preferred
+        # case-insensitive
+        low = preferred.lower()
+        for c in cols_list:
+            if c.lower() == low:
+                return c
 
-    # まずはto_datetime
-    dt = pd.to_datetime(df[dt_col], utc=True, errors="coerce")
+    if fallbacks:
+        for cand in fallbacks:
+            low = cand.lower()
+            for c in cols_list:
+                if c.lower() == low:
+                    return c
+    return None
 
-    # NaTが多い＝タイムゾーン情報付き/naive混在の可能性 → 再判定
-    if dt.isna().any():
-        # 一旦tzなしで解釈
-        dt2 = pd.to_datetime(df[dt_col], errors="coerce")
-        # tzなし→UTCと見なす（よくある: 夜間集計がUTCベース）
-        mask_naive = dt2.notna() & (dt2.dt.tz is None)
-        if mask_naive.any():
-            dt.loc[mask_naive] = dt2.loc[mask_naive].dt.tz_localize("UTC")
-        # tz付きはdtが既に解釈している想定
 
-    # すべてJSTへ
-    dt = dt.dt.tz_convert("Asia/Tokyo")
-    out = df.copy()
-    out.index = dt
-    return out.drop(columns=[dt_col])
-
-def pick_value_column(df: pd.DataFrame, index_key: str) -> str:
+def to_jst_index(raw: pd.DataFrame, dt_col: Optional[str]) -> pd.DataFrame:
     """
-    指数列名を推定する。
-    例: index_key=scoin_plus -> 'S-COIN+' / 'SCOIN_PLUS' / 'scoin_plus' などを優先探索
+    Make DatetimeIndex in JST.
+    - If tz-aware: convert to Asia/Tokyo
+    - If naive: assume it's already JST and localize to Asia/Tokyo
+    Auto-detect datetime column when not specified.
     """
-    candidates = [
-        index_key,
-        index_key.upper(),
-        index_key.replace("_", " ").upper(),
-        index_key.replace("_", "-").upper(),
-        index_key.replace("-", "_").upper(),
-    ]
+    dt_name = _resolve_col(
+        raw.columns,
+        preferred=dt_col,
+        fallbacks=["Datetime", "timestamp", "time", "date", "datetime"]
+    )
+    if dt_name is None:
+        # as the last resort, take the first column
+        dt_name = raw.columns[0]
 
-    # CSVから大文字化リスト
-    cols_upper = {c.upper(): c for c in df.columns}
-    # 最も素直な候補も加える
-    if index_key.lower() == "scoin_plus":
-        candidates = ["S-COIN+", "SCOIN_PLUS", "S COIN+", "SCOIN+", *candidates]
-    if index_key.lower() == "astra4":
-        candidates = ["ASTRA4", *candidates]
-    if index_key.lower() == "rbank9":
-        candidates = ["R-BANK9", "RBANK9", *candidates]
+    ts = pd.to_datetime(raw[dt_name], errors="coerce")
 
-    for k in candidates:
-        if k in cols_upper:
-            return cols_upper[k]
+    if ts.isna().all():
+        raise ValueError(f"CSVの日時列を解釈できませんでした: 候補='{dt_name}', cols={list(raw.columns)}")
 
-    # 最後の保険：Datetime以外の1列を使う
-    numeric_cols = [c for c in df.columns if c.lower() != "datetime"]
+    # time zone handling
+    if getattr(ts.dt, "tz", None) is None:
+        # treat as JST already (no conversion of wall clock)
+        ts = ts.dt.tz_localize("Asia/Tokyo")
+    else:
+        ts = ts.dt.tz_convert("Asia/Tokyo")
+
+    df = raw.copy()
+    df.index = ts
+    # keep other columns only
+    if dt_name in df.columns:
+        df = df.drop(columns=[dt_name])
+    return df
+
+
+def resolve_value_col(df: pd.DataFrame, index_key: str, label: Optional[str]) -> str:
+    """
+    Find the value column by:
+      1) exact/case-insensitive match to index_key
+      2) exact/case-insensitive match to label (if provided)
+      3) substring match of index_key (case-insensitive)
+      4) if only one numeric column exists, use it
+    """
+    # 1) index_key exact/ci
+    cand = _resolve_col(df.columns, preferred=index_key)
+    if cand:
+        return cand
+
+    # 2) label exact/ci
+    if label:
+        cand = _resolve_col(df.columns, preferred=label)
+        if cand:
+            return cand
+
+    # 3) substring
+    lk = index_key.lower()
+    for c in df.columns:
+        if lk in c.lower():
+            return c
+
+    # 4) only numeric column?
+    numeric_cols = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
     if len(numeric_cols) == 1:
         return numeric_cols[0]
 
-    raise ValueError(f"指数列を特定できませんでした。index-key={index_key}, CSV列={list(df.columns)}")
+    raise ValueError(f"CSVに '{index_key}' に対応する列が見つかりません。候補: {list(df.columns)}")
 
-def hhmm_to_time(hhmm: str) -> Tuple[int, int]:
-    h, m = hhmm.split(":")
-    return int(h), int(m)
 
-def filter_session(df_jst: pd.DataFrame, start_hhmm: str, end_hhmm: str) -> pd.DataFrame:
-    """JST IndexのDataFrameを、[start, end]（両端含む）でフィルタ。"""
-    sh, sm = hhmm_to_time(start_hhmm)
-    eh, em = hhmm_to_time(end_hhmm)
-    # between_time(, inclusive="both") はPandas>=2で引数名が変更
-    mask = (
-        (df_jst.index.hour > sh) | ((df_jst.index.hour == sh) & (df_jst.index.minute >= sm))
-    ) & (
-        (df_jst.index.hour < eh) | ((df_jst.index.hour == eh) & (df_jst.index.minute <= em))
-    )
-    return df_jst.loc[mask]
+def parse_hhmm(s: str) -> Tuple[int, int]:
+    m = re.fullmatch(r"(\d{2}):(\d{2})", s)
+    if not m:
+        raise ValueError(f"時刻形式が不正です: {s!r} （HH:MM）")
+    return int(m.group(1)), int(m.group(2))
 
-def pick_anchor_value(df_jst: pd.DataFrame, basis: str, anchor_hhmm: str, value_col: str) -> float:
+
+def filter_session(df: pd.DataFrame, session_start: str, session_end: str) -> pd.DataFrame:
     """
-    騰落率計算の基準値を返す。
-    - prev_close: 前営業日終値。見つからなければ当日初値で代用（安定化）。
-    - open@HH:MM: 指定時刻以降の最初の値（当日寄りの代替として使用）。
+    Keep rows between session_start and session_end (inclusive).
+    Index must be tz-aware (JST).
     """
+    sh, sm = parse_hhmm(session_start)
+    eh, em = parse_hhmm(session_end)
+    t0 = dtime(sh, sm)
+    t1 = dtime(eh, em)
+    idx_time = df.index.time
+    mask = (idx_time >= t0) & (idx_time <= t1)
+    return df.loc[mask].copy()
+
+
+def pick_anchor_value(series: pd.Series, anchor_hhmm: str) -> Optional[float]:
+    """
+    Get value at/after the anchor time on the same day.
+    If exact match is missing, choose the first record at or after the time.
+    """
+    ah, am = parse_hhmm(anchor_hhmm)
+    anchor_t = dtime(ah, am)
+    # mask at/after anchor time
+    m = series.index.time >= anchor_t
+    if not m.any():
+        return None
+    return float(series.loc[m].iloc[0])
+
+
+def compute_series_by_basis(series: pd.Series, basis: str, day_anchor: str) -> Tuple[pd.Series, str]:
+    """
+    Two modes:
+      - "prev_close": values are already % vs previous close -> use as-is
+      - "open@HH:MM": subtract the anchor's value (assumes series itself is % vs prev close)
+    Return (series_% , y_label)
+    """
+    basis = basis.strip().lower()
     if basis == "prev_close":
-        df_local = df_jst.copy()
-        today = df_local.index[-1].date()
-        prev = df_local[df_local.index.date < today]
-        if not prev.empty:
-            return float(prev[value_col].iloc[-1])
-        # 前日データが無い（CSVが当日分のみ等）→当日初値を基準に
-        print("[warn] 前日データが見つからないため、当日初値をprev_closeとして使用します。")
-        return float(df_local[value_col].iloc[0])
+        y_label = "Change vs Prev Close (%)"
+        return series, y_label
 
-    if basis.startswith("open@"):
-        hhmm = basis.split("@", 1)[1] if "@" in basis else anchor_hhmm
-        a_h, a_m = hhmm_to_time(hhmm)
-        after = df_jst[
-            (df_jst.index.hour > a_h) | ((df_jst.index.hour == a_h) & (df_jst.index.minute >= a_m))
-        ]
-        if not after.empty:
-            return float(after[value_col].iloc[0])
-        print("[warn] 指定open時間のデータが無いため、当日初値を基準にします。")
-        return float(df_jst[value_col].iloc[0])
+    m = re.fullmatch(r"open@(\d{2}:\d{2})", basis)
+    if m:
+        anchor = pick_anchor_value(series, m.group(1))
+        if anchor is None:
+            # fallback: use first value of day
+            anchor = float(series.iloc[0])
+        y_label = "Change vs Anchor (%)"
+        return series - anchor, y_label
 
-    raise ValueError(f"未知のbasis: {basis}")
+    # unknown basis -> fallback to as-is
+    y_label = "Change (%)"
+    return series, y_label
 
-def compute_change_pct(series: pd.Series, anchor: float) -> pd.Series:
-    """(value / anchor - 1) * 100"""
-    return (series.astype(float) / float(anchor) - 1.0) * 100.0
 
-# ---------- Plot ----------
+# ---------------------------
+# Plot
+# ---------------------------
 
-def plot_intraday_png(
-    df_plot: pd.DataFrame,
-    value_col: str,
+def plot_snapshot(
+    ts: pd.Series,
     label: str,
-    png_path: str,
-    title_time: pd.Timestamp,
-):
-    """黒背景・シアン線・白スパイン無しで保存。"""
+    title_dt_str: str,
+    y_label: str,
+    out_png: str
+) -> None:
+    # Dark figure (no white border)
     plt.close("all")
-    fig, ax = plt.subplots(figsize=(16, 9), dpi=120)
+    fig = plt.figure(figsize=(12, 6), dpi=160)
+    ax = fig.add_subplot(111)
     fig.patch.set_facecolor("black")
     ax.set_facecolor("black")
 
-    # 線
-    ax.plot(df_plot.index, df_plot[value_col], linewidth=2.2, color="#00e5e5", label=label)
-
-    # 軸・スパイン
+    # hide spines (frame)
     for spine in ax.spines.values():
         spine.set_visible(False)
-    ax.tick_params(colors="#cccccc")
-    ax.xaxis.set_major_locator(MaxNLocator(nbins=8))
-    ax.grid(True, color="#333333", linewidth=0.7, alpha=0.6)
 
-    ax.set_xlabel("Time", color="#cccccc")
-    ax.set_ylabel("Change vs Prev Close (%)", color="#cccccc")
+    # grid & ticks
+    ax.grid(False)
+    ax.tick_params(colors="white", which="both")
 
-    title = f"{label} Intraday Snapshot ({title_time.strftime('%Y/%m/%d %H:%M')})"
-    ax.set_title(title, color="#dddddd", fontsize=16)
+    # line
+    ax.plot(ts.index, ts.values, linewidth=2.0, color="#00e5e6", label=label)
 
-    # 凡例
-    leg = ax.legend(facecolor="black", edgecolor="none", labelcolor="#cccccc")
-    for t in leg.get_texts():
-        t.set_color("#cccccc")
+    # labels
+    ax.set_title(f"{label} Intraday Snapshot ({title_dt_str})", color="white", fontsize=14, pad=14)
+    ax.set_xlabel("Time", color="white")
+    ax.set_ylabel(y_label, color="white")
 
-    fig.tight_layout()
-    fig.savefig(png_path, facecolor=fig.get_facecolor(), edgecolor="none")
+    # legend (dark)
+    leg = ax.legend(facecolor="black", edgecolor="black", labelcolor="white")
+    for txt in leg.get_texts():
+        txt.set_color("white")
+
+    fig.tight_layout(pad=2.0)
+    fig.savefig(out_png, facecolor=fig.get_facecolor(), bbox_inches="tight")
     plt.close(fig)
 
-# ---------- Text / JSON ----------
 
-@dataclass
-class SnapshotStats:
-    index_key: str
-    label: str
-    pct_intraday: float
-    basis: str
-    session_start: str
-    session_end: str
-    anchor: str
-    updated_at: str
+# ---------------------------
+# Post text & JSON
+# ---------------------------
 
-def build_post_text(label: str, pct: float, now_jst: pd.Timestamp, basis: str) -> str:
-    arrow = "▲" if pct >= 0 else "▼"
+def build_post_text(label_jp: str, pct_now: float, basis: str, now_jst: pd.Timestamp, hashtag: str) -> str:
+    ts_str = now_jst.strftime("%Y/%m/%d %H:%M")
+    sign = "▲" if pct_now >= 0 else "▼"
     return (
-        f"{arrow} {label} 日中スナップショット（{now_jst.strftime('%Y/%m/%d %H:%M')}）\n"
-        f"{pct:+.2f}%（基準: {basis}）\n"
-        f"#{label.replace('+','PLUS').replace('-','').replace(' ','_')} #日本株"
+        f"{sign} {label_jp} 日中スナップショット（{ts_str}）\n"
+        f"{pct_now:+.2f}%（基準: {basis}）\n"
+        f"#{hashtag} #日本株\n"
     )
 
-# ---------- Main ----------
+
+def dump_stats_json(
+    index_key: str,
+    label: str,
+    pct_now: float,
+    basis: str,
+    session_start: str,
+    session_end: str,
+    day_anchor: str,
+    out_json: str,
+) -> None:
+    now_jst = pd.Timestamp.now(tz="Asia/Tokyo")
+    data = {
+        "index_key": index_key.upper(),
+        "label": label,
+        "pct_intraday": float(pct_now),
+        "basis": basis,
+        "session": {
+            "start": session_start,
+            "end": session_end,
+            "anchor": day_anchor,
+        },
+        "updated_at": now_jst.isoformat(),
+    }
+    pd.Series(data).to_json(out_json, force_ascii=False, indent=2)
+
+
+# ---------------------------
+# Main
+# ---------------------------
 
 def main():
-    args = parse_args()
+    args = build_parser().parse_args()
 
-    # 表示用ラベル
+    # Label
     label = args.label or args.index_key.upper()
+    hashtag = label  # 例: S-COIN+ / ASTRA4 など
 
-    # CSV読込 → JSTIndex化
+    # Load & index
     raw = pd.read_csv(args.csv)
-    df = to_jst_index(raw, dt_col="Datetime")
+    df_jst = to_jst_index(raw, dt_col=args.dt_col)
 
-    # 値列の特定
-    value_col = pick_value_column(df, args.index_key)
+    # Resolve value column
+    value_col = resolve_value_col(df_jst, index_key=args.index_key, label=label)
+    series = pd.to_numeric(df_jst[value_col], errors="coerce").dropna()
 
-    # セッションで絞る（JST）
-    df_jst = df[[value_col]].sort_index()
-    df_sess = filter_session(df_jst, args.session_start, args.session_end)
+    # Filter by session
+    df_sess = filter_session(series.to_frame("v"), args.session_start, args.session_end)
     if df_sess.empty:
         raise ValueError("セッション内データがありません。")
 
-    # 基準値の決定
-    anchor_val = pick_anchor_value(df_jst, args.basis, args.day_anchor, value_col)
+    series_sess = df_sess["v"]
 
-    # 騰落率（％）
-    df_sess_pct = df_sess.copy()
-    df_sess_pct[value_col] = compute_change_pct(df_sess_pct[value_col], anchor_val)
+    # Compute by basis
+    series_pct, y_label = compute_series_by_basis(series_sess, args.basis, args.day_anchor)
 
-    # 最新値の騰落率
-    latest_pct = float(df_sess_pct[value_col].iloc[-1])
-
-    # スナップショットPNG（黒背景）
+    # Current stats
+    pct_now = float(series_pct.iloc[-1])
     now_jst = pd.Timestamp.now(tz="Asia/Tokyo")
-    plot_intraday_png(df_sess_pct, value_col, label, args.snapshot_png, now_jst)
 
-    # ポスト本文
-    post_text = build_post_text(label, latest_pct, now_jst, args.basis)
+    # Snapshot
+    title_dt_str = now_jst.strftime("%Y/%m/%d %H:%M")
+    plot_snapshot(series_pct, label=label, title_dt_str=title_dt_str, y_label=y_label, out_png=args.snapshot_png)
+
+    # Post text
+    post_text = build_post_text(label_jp=label, pct_now=pct_now, basis=args.basis, now_jst=now_jst, hashtag=hashtag)
     with open(args.out_text, "w", encoding="utf-8") as f:
-        f.write(post_text.strip() + "\n")
+        f.write(post_text)
 
-    # stats JSON
-    stats = SnapshotStats(
-        index_key=label.replace("+", "_PLUS").replace("-", "_").upper(),
+    # JSON
+    dump_stats_json(
+        index_key=args.index_key,
         label=label,
-        pct_intraday=latest_pct,
+        pct_now=pct_now,
         basis=args.basis,
         session_start=args.session_start,
         session_end=args.session_end,
-        anchor=args.day_anchor,
-        updated_at=now_jst.isoformat(),
+        day_anchor=args.day_anchor,
+        out_json=args.out_json,
     )
-    with open(args.out_json, "w", encoding="utf-8") as f:
-        json.dump(
-            {
-                "index_key": stats.index_key,
-                "label": stats.label,
-                "pct_intraday": stats.pct_intraday,
-                "basis": stats.basis,
-                "session": {
-                    "start": stats.session_start,
-                    "end": stats.session_end,
-                    "anchor": stats.anchor,
-                },
-                "updated_at": stats.updated_at,
-            },
-            f,
-            ensure_ascii=False,
-            indent=2,
-        )
-
-    print(f"[ok] snapshot: {args.snapshot_png}")
-    print(f"[ok] text    : {args.out_text}")
-    print(f"[ok] json    : {args.out_json}")
 
 
 if __name__ == "__main__":
