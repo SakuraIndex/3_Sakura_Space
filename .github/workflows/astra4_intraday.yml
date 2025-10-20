@@ -1,10 +1,7 @@
-name: Astra4 • intraday snapshot (JST 11:35 & 15:35)
+name: ASTRA4 • intraday snapshot (JST 09:00–15:30)
 
 on:
-  schedule:
-    # JST 11:35 / 15:35 → UTC 02:35 / 06:35
-    - cron: "35 2 * * 1-5"
-    - cron: "35 6 * * 1-5"
+  # 手動実行用（必要に応じて時刻を上書きできます）
   workflow_dispatch:
     inputs:
       session_start:
@@ -16,13 +13,17 @@ on:
         required: true
         default: "15:30"
       day_anchor:
-        description: "Day anchor time for labeling (HH:MM JST)"
+        description: "Day anchor for labeling (HH:MM JST)"
         required: true
         default: "09:00"
       basis:
-        description: "Return basis label (open@09:00 / prev_close)"
+        description: "Return basis label"
         required: true
         default: "prev_close"
+  # 自動実行（JST 11:35 / 15:35）= UTC 02:35 / 06:35
+  schedule:
+    - cron: "35 2 * * 1-5"
+    - cron: "35 6 * * 1-5"
 
 permissions:
   contents: write
@@ -57,6 +58,7 @@ jobs:
         run: |
           test -f scripts/make_intraday_post.py || (echo "Missing scripts/make_intraday_post.py" && exit 2)
           test -f docs/outputs/astra4_intraday.csv || (echo "Missing docs/outputs/astra4_intraday.csv" && exit 2)
+          # 手動実行時の簡易バリデーション（スケジュール実行時はデフォルト値が入る）
           [[ "${{ inputs.session_start || '09:00' }}" =~ ^[0-9]{2}:[0-9]{2}$ ]] || (echo "session_start invalid"; exit 2)
           [[ "${{ inputs.session_end   || '15:30' }}" =~ ^[0-9]{2}:[0-9]{2}$ ]] || (echo "session_end invalid";   exit 2)
           [[ "${{ inputs.day_anchor    || '09:00' }}" =~ ^[0-9]{2}:[0-9]{2}$ ]] || (echo "day_anchor invalid";    exit 2)
@@ -64,6 +66,7 @@ jobs:
       - name: Generate intraday post and snapshot
         env:
           INDEX_KEY: astra4
+          LABEL: ASTRA4
           CSV: docs/outputs/astra4_intraday.csv
           OUT_JSON: docs/outputs/astra4_stats.json
           OUT_TEXT: docs/outputs/astra4_post_intraday.txt
@@ -91,7 +94,7 @@ jobs:
             --session-end "${SESSION_END}" \
             --day-anchor "${DAY_ANCHOR}" \
             --basis "${BASIS}" \
-            --value-type percent
+            --label "${LABEL}"
 
       - name: Upload artifacts (for debug)
         if: always()
