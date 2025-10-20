@@ -1,80 +1,52 @@
-name: ASTRA4 • intraday snapshot (JST 09:00–15:30)
+name: Astra4 Intraday Snapshot
 
 on:
-  # 手動実行用（必要に応じて時刻を上書きできます）
-  workflow_dispatch:
-    inputs:
-      session_start:
-        description: "Session start (HH:MM JST)"
-        required: true
-        default: "09:00"
-      session_end:
-        description: "Session end (HH:MM JST)"
-        required: true
-        default: "15:30"
-      day_anchor:
-        description: "Day anchor for labeling (HH:MM JST)"
-        required: true
-        default: "09:00"
-      basis:
-        description: "Return basis label"
-        required: true
-        default: "prev_close"
-  # 自動実行（JST 11:35 / 15:35）= UTC 02:35 / 06:35
   schedule:
-    - cron: "35 2 * * 1-5"
-    - cron: "35 6 * * 1-5"
-
-permissions:
-  contents: write
-
-concurrency:
-  group: astra4-intraday-${{ github.ref }}
-  cancel-in-progress: false
+    # 11:35 JST と 15:35 JST に自動実行
+    - cron: '35 2 * * 1-5'  # 11:35 JST（= 02:35 UTC）
+    - cron: '35 6 * * 1-5'  # 15:35 JST（= 06:35 UTC）
+  workflow_dispatch:  # 手動実行も可
+    inputs:
+      reason:
+        description: 'Manual trigger reason'
+        required: false
+        default: 'manual run'
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
 
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-          persist-credentials: true
 
-      - name: Setup Python 3.11
+      - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: '3.11'
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          pip install -r requirements.txt
 
       - name: Verify scripts & inputs exist
         run: |
           test -f scripts/make_intraday_post.py || (echo "Missing scripts/make_intraday_post.py" && exit 2)
           test -f docs/outputs/astra4_intraday.csv || (echo "Missing docs/outputs/astra4_intraday.csv" && exit 2)
-          # 手動実行時の簡易バリデーション（スケジュール実行時はデフォルト値が入る）
-          [[ "${{ inputs.session_start || '09:00' }}" =~ ^[0-9]{2}:[0-9]{2}$ ]] || (echo "session_start invalid"; exit 2)
-          [[ "${{ inputs.session_end   || '15:30' }}" =~ ^[0-9]{2}:[0-9]{2}$ ]] || (echo "session_end invalid";   exit 2)
-          [[ "${{ inputs.day_anchor    || '09:00' }}" =~ ^[0-9]{2}:[0-9]{2}$ ]] || (echo "day_anchor invalid";    exit 2)
 
       - name: Generate intraday post and snapshot
         env:
           INDEX_KEY: astra4
-          LABEL: ASTRA4
           CSV: docs/outputs/astra4_intraday.csv
           OUT_JSON: docs/outputs/astra4_stats.json
           OUT_TEXT: docs/outputs/astra4_post_intraday.txt
           SNAPSHOT_PNG: docs/outputs/astra4_intraday.png
-          SESSION_START: ${{ inputs.session_start || '09:00' }}
-          SESSION_END:   ${{ inputs.session_end   || '15:30' }}
-          DAY_ANCHOR:    ${{ inputs.day_anchor    || '09:00' }}
-          BASIS:         ${{ inputs.basis         || 'prev_close' }}
+          SESSION_START: "09:00"
+          SESSION_END: "15:30"
+          DAY_ANCHOR: "09:00"
+          BASIS: prev_close
+          VALUE_TYPE: ratio       # ← 値の種類を「比率」として明示
         run: |
           set -euo pipefail
           echo "=== intraday snapshot (Astra4) ==="
@@ -83,6 +55,7 @@ jobs:
           echo "SESSION_END=${SESSION_END}"
           echo "DAY_ANCHOR=${DAY_ANCHOR}"
           echo "BASIS=${BASIS}"
+          echo "VALUE_TYPE=${VALUE_TYPE}"
 
           python scripts/make_intraday_post.py \
             --index-key "${INDEX_KEY}" \
@@ -94,31 +67,22 @@ jobs:
             --session-end "${SESSION_END}" \
             --day-anchor "${DAY_ANCHOR}" \
             --basis "${BASIS}" \
-            --label "${LABEL}"
+            --value-type "${VALUE_TYPE}"
 
       - name: Upload artifacts (for debug)
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: astra4_intraday_artifacts
+          name: astra4_intraday_outputs
           path: |
             docs/outputs/astra4_intraday.png
             docs/outputs/astra4_post_intraday.txt
             docs/outputs/astra4_stats.json
-          if-no-files-found: ignore
-          retention-days: 3
 
       - name: Commit outputs if changed
         run: |
-          set -e
-          git config --global user.name  "github-actions"
-          git config --global user.email "github-actions@github.com"
-          git add docs/outputs/astra4_intraday.png \
-                  docs/outputs/astra4_post_intraday.txt \
-                  docs/outputs/astra4_stats.json || true
-          if ! git diff --cached --quiet; then
-            git commit -m "chore(intraday): update astra4 (snapshot & post)"
-            git push
-          else
-            echo "No output changes."
-          fi
+          git config --global user.name "github-actions"
+          git config --global user.email "actions@github.com"
+          git add docs/outputs/astra4_intraday.png docs/outputs/astra4_post_intraday.txt docs/outputs/astra4_stats.json || true
+          git diff --cached --quiet || git commit -m "chore(intraday): update astra4 (snapshot & post)"
+          git push origin main
