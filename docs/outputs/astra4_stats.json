@@ -1,12 +1,1 @@
-{
-  "index_key": "ASTRA4",
-  "label": "ASTRA4",
-  "pct_intraday": 3.5222099001178098,
-  "basis": "prev_close",
-  "session": {
-    "start": "09:00",
-    "end": "15:30",
-    "anchor": "09:00"
-  },
-  "updated_at": "2025-10-20T20:49:42.770489+09:00"
-}
+{"index_key": "astra4", "pct_1d": -3.537952, "delta_level": -0.03538, "scale": "level", "updated_at": "2025-10-21T06:57:13Z"}
