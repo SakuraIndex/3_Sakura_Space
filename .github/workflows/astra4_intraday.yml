@@ -7,7 +7,6 @@ permissions:
   contents: write
 
 env:
-  # ── Index/IO
   INDEX_KEY: ASTRA4
   LABEL: ASTRA4
   CSV: docs/outputs/astra4_intraday.csv
@@ -17,11 +16,11 @@ env:
   DT_COL: Datetime
   BASIS: prev_close
   VALUE_TYPE_IN: percent
-  # ── Session (JST)
+
   SESSION_START: "09:00"
   SESSION_END:   "15:30"
   DAY_ANCHOR:    "09:00"
-  # ── Site repo
+
   SITE_REPO: Sakuralndex/Sakura-Index-Site
   SITE_BRANCH: main
   PUBLISH_DIR: charts/ASTRA4
@@ -76,7 +75,7 @@ jobs:
           set -euo pipefail
           echo "=== Generate ${INDEX_KEY} intraday snapshot ==="
 
-          # ASTRA4 は --snapshot-png なしでも JSON/TEXT 出力に対応
+          # JSON/TEXT を生成（PNG はオプショナル）
           python scripts/make_intraday_post.py \
             --index-key "${INDEX_KEY}" \
             --csv "${CSV}" \
@@ -89,16 +88,10 @@ jobs:
             --dt-col "${DT_COL}" \
             --value-type "${VALUE_TYPE_IN}"
 
-          # PNG が無ければ簡易チャートをフォールバック生成（python -c で YAML 衝突回避）
+          # PNG が無ければフォールバック（1 行の python -c で YAML 衝突回避）
           if [ ! -f "${SNAPSHOT_PNG}" ]; then
             echo "[fallback] ${SNAPSHOT_PNG} を生成します"
-            python -c "import pandas as pd, matplotlib.pyplot as plt, pathlib; \
-p=pathlib.Path('${CSV}'); q=pathlib.Path('${SNAPSHOT_PNG}'); \
-df=pd.read_csv(p); cols=[c for c in df.columns if c!='${DT_COL}']; \
-y=[0] if len(cols)==0 else df[cols].mean(axis=1).tolist(); \
-plt.figure(figsize=(8,3), dpi=160); plt.plot(range(len(y)), y); \
-plt.title('ASTRA4 Intraday (fallback)'); plt.tight_layout(); \
-q.parent.mkdir(parents=True, exist_ok=True); plt.savefig(q)"
+            python -c "import pandas as pd, matplotlib.pyplot as plt, pathlib; p=pathlib.Path('${CSV}'); q=pathlib.Path('${SNAPSHOT_PNG}'); df=pd.read_csv(p); cols=[c for c in df.columns if c!='${DT_COL}']; y=[0] if len(cols)==0 else df[cols].mean(axis=1).tolist(); plt.figure(figsize=(8,3), dpi=160); plt.plot(range(len(y)), y); plt.title('ASTRA4 Intraday (fallback)'); plt.tight_layout(); q.parent.mkdir(parents=True, exist_ok=True); plt.savefig(q)"
           fi
 
       - name: Upload artifacts (for debug)
@@ -108,6 +101,7 @@ q.parent.mkdir(parents=True, exist_ok=True); plt.savefig(q)"
           name: astra4_intraday_artifacts
           path: |
             ${{ env.OUT_TEXT }}
+            ${{ env.OUT_JSON }}
             ${{ env.SNAPSHOT_PNG }}
 
       - name: Checkout site repo (for publishing)
@@ -123,7 +117,6 @@ q.parent.mkdir(parents=True, exist_ok=True); plt.savefig(q)"
         run: |
           set -e
           mkdir -p "site/${PUBLISH_DIR}"
-          # intraday.png は存在すれば反映、無ければスキップ（このステップ以降は stats.json を使う想定）
           [ -f "${SNAPSHOT_PNG}" ] && cp -f "${SNAPSHOT_PNG}" "site/${PUBLISH_DIR}/intraday.png" || true
           cp -f "${OUT_JSON}" "site/${PUBLISH_DIR}/stats.json"
 
