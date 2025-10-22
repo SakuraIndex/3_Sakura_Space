@@ -10,20 +10,19 @@ env:
   INDEX_KEY: ASTRA4
   LABEL: ASTRA4
   CSV: docs/outputs/astra4_intraday.csv
-  OUT_JSON: docs/outputs/astra4_stats.json
-  OUT_TEXT: docs/outputs/astra4_post_intraday.txt
-  SNAPSHOT_PNG: docs/outputs/astra4_intraday.png
   DT_COL: Datetime
   BASIS: prev_close
-  VALUE_TYPE_IN: percent
-
-  SESSION_START: "09:00"
-  SESSION_END:   "15:30"
-  DAY_ANCHOR:    "09:00"
-
-  SITE_REPO: Sakuralndex/Sakura-Index-Site
+  # 公開先サイト（←ここがtypoしがち）
+  SITE_REPO: SakuraIndex/Sakura-Index-Site
   SITE_BRANCH: main
-  PUBLISH_DIR: charts/ASTRA4
+  PUBLISH_DIR: docs/charts/${{ env.INDEX_KEY }}
+  OUT_JSON: docs/outputs/${{ env.INDEX_KEY, '' }}_stats.json
+  OUT_TEXT: docs/outputs/${{ env.INDEX_KEY, '' }}_post_intraday.txt
+  SNAPSHOT_PNG: docs/outputs/${{ env.INDEX_KEY, '' }}_intraday.png
+
+concurrency:
+  group: intraday-${{ github.ref }}-${{ env.INDEX_KEY }}
+  cancel-in-progress: false
 
 jobs:
   build:
@@ -39,18 +38,23 @@ jobs:
       - name: Setup Python 3.11
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: '3.11'
 
       - name: Install dependencies
         run: |
-          python -m pip install -U pip
-          python -m pip install pandas matplotlib
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          # フォールバック用（最小）
+          python - <<'PY'
+          import sys,subprocess
+          subprocess.check_call([sys.executable,"-m","pip","install","pandas","matplotlib"])
+          PY
 
       - name: Verify inputs & files
         run: |
           set -e
-          test -f "${CSV}" || { echo "Missing CSV: ${CSV}"; exit 1; }
-          test -f scripts/make_intraday_post.py || { echo "Missing script: scripts/make_intraday_post.py"; exit 1; }
+          test -f "${CSV}" || (echo "Missing CSV: ${CSV}" && exit 1)
+          test -f scripts/make_intraday_post.py || (echo "Missing script: scripts/make_intraday_post.py" && exit 1)
 
       - name: Decide publish variant (AM / PM)
         id: ampm
@@ -64,35 +68,50 @@ jobs:
           fi
 
       - name: Generate intraday snapshot and post (with fallback)
-        shell: bash
         env:
-          SESSION_START: ${{ env.SESSION_START }}
-          SESSION_END:   ${{ env.SESSION_END }}
-          DAY_ANCHOR:    ${{ env.DAY_ANCHOR }}
+          SESSION_START: '09:00'
+          SESSION_END:   '15:30'
+          DAY_ANCHOR:    '09:00'
           BASIS:         ${{ env.BASIS }}
-          VALUE_TYPE_IN: ${{ env.VALUE_TYPE_IN }}
+          VALUE_TYPE:    percent
         run: |
           set -euo pipefail
           echo "=== Generate ${INDEX_KEY} intraday snapshot ==="
-
-          # JSON/TEXT を生成（PNG も指定。PNG が作られなくても後段でフォールバック）
           python scripts/make_intraday_post.py \
             --index-key "${INDEX_KEY}" \
             --csv "${CSV}" \
-            --out-text "${OUT_TEXT}" \
             --out-json "${OUT_JSON}" \
+            --out-text "${OUT_TEXT}" \
             --snapshot-png "${SNAPSHOT_PNG}" \
             --session-start "${SESSION_START}" \
             --session-end "${SESSION_END}" \
             --day-anchor "${DAY_ANCHOR}" \
             --basis "${BASIS}" \
             --dt-col "${DT_COL}" \
-            --value-type "${VALUE_TYPE_IN}"
+            --value-type "${VALUE_TYPE}" \
+            --label "${LABEL}" || FALLBACK=1
 
-          # PNG が無ければフォールバック（1 行の python -c で YAML 衝突回避）
+          # フォールバック: PNG が無ければ超簡易チャートを作成
           if [ ! -f "${SNAPSHOT_PNG}" ]; then
             echo "[fallback] ${SNAPSHOT_PNG} を生成します"
-            python -c "import pandas as pd, matplotlib.pyplot as plt, pathlib; p=pathlib.Path('${CSV}'); q=pathlib.Path('${SNAPSHOT_PNG}'); df=pd.read_csv(p); cols=[c for c in df.columns if c!='${DT_COL}']; y=[0] if len(cols)==0 else df[cols].mean(axis=1).tolist(); plt.figure(figsize=(8,3), dpi=160); plt.plot(range(len(y)), y); plt.title('ASTRA4 Intraday (fallback)'); plt.tight_layout(); q.parent.mkdir(parents=True, exist_ok=True); plt.savefig(q)"
+            python - <<'PY'
+            import pandas as pd, matplotlib.pyplot as plt, pathlib
+            csv  = pathlib.Path("docs/outputs/astra4_intraday.csv")
+            png  = pathlib.Path("docs/outputs/astra4_intraday.png")
+            df   = pd.read_csv(csv)
+            num  = [c for c in df.columns if c != "Datetime"]
+            if len(num)==0:
+              x=[0]; y=[0]
+            else:
+              y = df[num].mean(axis=1).tolist()
+              x = range(len(y))
+            plt.figure(figsize=(8,3), dpi=160)
+            plt.plot(list(x), list(y))
+            plt.title("ASTRA4 Intraday (fallback)")
+            plt.tight_layout()
+            png.parent.mkdir(parents=True, exist_ok=True)
+            plt.savefig(png)
+            PY
           fi
 
       - name: Upload artifacts (for debug)
@@ -101,38 +120,40 @@ jobs:
         with:
           name: astra4_intraday_artifacts
           path: |
-            ${{ env.OUT_TEXT }}
-            ${{ env.OUT_JSON }}
-            ${{ env.SNAPSHOT_PNG }}
+            ${OUT_JSON}
+            ${OUT_TEXT}
+            ${SNAPSHOT_PNG}
+
+      # —— ここからサイト反映 ——————————————————————————
 
       - name: Checkout site repo (for publishing)
         uses: actions/checkout@v4
         with:
           repository: ${{ env.SITE_REPO }}
           ref: ${{ env.SITE_BRANCH }}
-          token: ${{ secrets.SITE_PAT }}
           path: site
+          token: ${{ secrets.SITE_PAT }}
+          fetch-depth: 1
 
       - name: Copy snapshot files into site tree
-        shell: bash
         run: |
           set -e
           mkdir -p "site/${PUBLISH_DIR}"
-          [ -f "${SNAPSHOT_PNG}" ] && cp -f "${SNAPSHOT_PNG}" "site/${PUBLISH_DIR}/intraday.png" || true
-          cp -f "${OUT_JSON}" "site/${PUBLISH_DIR}/stats.json"
+          # 画像（1日チャート）
+          cp -f "${SNAPSHOT_PNG}" "site/${PUBLISH_DIR}/astra4_1d.png"
+          # stats.json（サイト側の loader が参照）
+          cp -f "${OUT_JSON}"     "site/${PUBLISH_DIR}/astra4_stats.json"
 
       - name: Commit & push site charts
         working-directory: site
-        shell: bash
         run: |
           set -e
           git config user.name  "sakura-bot"
-          git config user.email "bot@sakura-index.local"
-          git add "${PUBLISH_DIR}/stats.json" || true
-          [ -f "${PUBLISH_DIR}/intraday.png" ] && git add "${PUBLISH_DIR}/intraday.png" || true
+          git config user.email "actions@users.noreply.github.com"
+          git add -A
           if git diff --cached --quiet; then
             echo "No site changes."
           else
-            git commit -m "chore(ASTRA4): publish intraday snapshot & stats"
+            git commit -m "chore(astra4): update charts & stats (snapshot & post)"
             git push origin "${{ env.SITE_BRANCH }}"
           fi
