@@ -40,7 +40,6 @@ env:
   OUT_TEXT: docs/outputs/astra4_post_intraday.txt
   SNAPSHOT_PNG: docs/outputs/astra4_intraday.png
 
-  # Site repo
   SITE_REPO: SakuraIndex/Sakura-Index-Site
   SITE_BRANCH: main
 
@@ -106,15 +105,15 @@ jobs:
             --label "${LABEL}" \
             ${VT_ARGS}
 
-      - name: Upload artifacts (debug)
+      - name: Upload artifacts (for debug)
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: astra4_intraday_artifacts
           path: |
-            ${OUT_JSON}
-            ${OUT_TEXT}
-            ${SNAPSHOT_PNG}
+            ${{ env.OUT_JSON }}
+            ${{ env.OUT_TEXT }}
+            ${{ env.SNAPSHOT_PNG }}
           if-no-files-found: error
           retention-days: 3
 
@@ -145,7 +144,7 @@ jobs:
           git add docs/charts/${INDEX_KEY}/intraday.png docs/charts/${INDEX_KEY}/post_intraday.txt docs/charts/${INDEX_KEY}/stats.json || true
           if ! git diff --cached --quiet; then
             git commit -m "chore(charts): update ${INDEX_KEY} intraday"
-            git push origin "${SITE_BRANCH}"
+            git push origin "${{ env.SITE_BRANCH }}"
           else
             echo "No site changes."
           fi
