@@ -1,53 +1,28 @@
-name: "ASTRA4 • intraday + publish (JST 09:00–15:30)"
+name: ASTRA4 • intraday + publish (JST 09:00–15:30)
 
 on:
   workflow_dispatch:
-    inputs:
-      session_start:
-        description: "Session start (HH:MM JST)"
-        required: true
-        default: "09:00"
-      session_end:
-        description: "Session end (HH:MM JST)"
-        required: true
-        default: "15:30"
-      day_anchor:
-        description: "Day anchor time (HH:MM JST)"
-        required: true
-        default: "09:00"
-      value_type:
-        description: "Value type (ratio|percent)"
-        required: false
-        default: "percent"
-  schedule:
-    # 前場スナップ（09:00〜の途中更新）。必要なければ削除してOK
-    - cron: "35 2 * * 1-5"  # JST 11:35 = UTC 02:35
-    # 大引け後の実行。必要なければ調整
-    - cron: "15 6 * * 1-5"  # JST 15:15 = UTC 06:15（例）
 
 permissions:
   contents: write
 
 env:
-  # === インデックス固有の設定 ===
   INDEX_KEY: ASTRA4
   LABEL: ASTRA4
   CSV: docs/outputs/astra4_intraday.csv
-  DT_COL: "Datetime"
-  BASIS: "prev_close"
-  # 生成物（このリポ内）
   OUT_JSON: docs/outputs/astra4_stats.json
   OUT_TEXT: docs/outputs/astra4_post_intraday.txt
-  SNAPSHOT_PNG: charts/ASTRA4/intraday.png
-  # サイト公開先（Sakura-Index-Site）
-  SITE_REPO: SakuraIndex/Sakura-Index-Site
+  SNAPSHOT_PNG: docs/outputs/astra4_intraday.png
+  DT_COL: Datetime
+  BASIS: prev_close
+  SESSION_START: "09:00"
+  SESSION_END: "15:30"
+  DAY_ANCHOR: "09:00"
+  VALUE_TYPE_IN: percent
+
+  SITE_REPO: Sakuralndex/Sakura-Index-Site
   SITE_BRANCH: main
   PUBLISH_DIR: charts/ASTRA4
-
-# 同一ブランチ・同一ワークフローの重複実行を自動キャンセル
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
 
 jobs:
   build:
@@ -68,58 +43,66 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install -U pip
-          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          python -m pip install pandas matplotlib
 
       - name: Verify inputs & files
         run: |
-          set -eu
-          [[ -f "${CSV}" ]] || { echo "Missing CSV: ${CSV}"; exit 1; }
-          [[ -f scripts/make_intraday_post.py ]] || { echo "Missing script: scripts/make_intraday_post.py"; exit 1; }
+          set -e
+          test -f "${CSV}" || (echo "Missing CSV: ${CSV}" && exit 1)
+          test -f scripts/make_intraday_post.py || (echo "Missing script: scripts/make_intraday_post.py" && exit 1)
 
       - name: Decide publish variant (AM / PM)
+        id: ampm
         shell: bash
-        env:
-          RUN_SCHEDULE: ${{ github.event.schedule }}
         run: |
-          # デフォルト percent 固定（手動時 inputs で上書き可）
-          echo "VALUE_TYPE=${{ inputs.value_type || 'percent' }}" >> "$GITHUB_ENV"
+          H=$(TZ=Asia/Tokyo date +%H)
+          if [ "$H" -lt 12 ]; then echo "variant=am" >> "$GITHUB_OUTPUT"; else echo "variant=pm" >> "$GITHUB_OUTPUT"; fi
 
-          # AM/PM の自動判定（schedule 実行のときのみ）
-          if [[ -n "$RUN_SCHEDULE" ]]; then
-            if [[ "$RUN_SCHEDULE" == "35 2 * * 1-5" ]]; then
-              echo "PUBLISH_VARIANT=am" >> "$GITHUB_ENV"
-            else
-              echo "PUBLISH_VARIANT=pm" >> "$GITHUB_ENV"
-            fi
-          else
-            # 手動実行は PM として扱う（必要に応じて変更可）
-            echo "PUBLISH_VARIANT=pm" >> "$GITHUB_ENV"
-          fi
-
-      - name: Generate intraday snapshot and post
+      - name: Generate intraday snapshot and post (with fallback)
         env:
-          SESSION_START: ${{ inputs.session_start || '09:00' }}
-          SESSION_END:   ${{ inputs.session_end   || '15:30' }}
-          DAY_ANCHOR:    ${{ inputs.day_anchor    || '09:00' }}
-          VALUE_TYPE:    ${{ env.VALUE_TYPE }}
+          SESSION_START: ${{ env.SESSION_START }}
+          SESSION_END:   ${{ env.SESSION_END }}
+          DAY_ANCHOR:    ${{ env.DAY_ANCHOR }}
+          BASIS:         ${{ env.BASIS }}
+          VALUE_TYPE_IN: ${{ env.VALUE_TYPE_IN }}
         run: |
-          set -eu
-          mkdir -p "$(dirname "${SNAPSHOT_PNG}")"
-
+          set -euo pipefail
           echo "=== Generate ${INDEX_KEY} intraday snapshot ==="
+          # ASTRA4 は旧 CLI 互換のため --snapshot-png を付けずに実行
           python scripts/make_intraday_post.py \
             --index-key "${INDEX_KEY}" \
             --csv "${CSV}" \
-            --out-json "${OUT_JSON}" \
             --out-text "${OUT_TEXT}" \
-            --snapshot-png "${SNAPSHOT_PNG}" \
+            --out-json "${OUT_JSON}" \
             --session-start "${SESSION_START}" \
-            --session-end   "${SESSION_END}" \
-            --day-anchor    "${DAY_ANCHOR}" \
-            --basis         "${BASIS}" \
-            --label         "${LABEL}" \
-            --dt-col        "${DT_COL}" \
-            --value-type    "${VALUE_TYPE}"
+            --session-end "${SESSION_END}" \
+            --day-anchor "${DAY_ANCHOR}" \
+            --basis "${BASIS}" \
+            --dt-col "${DT_COL}" \
+            --value-type "${VALUE_TYPE_IN}"
+
+          # PNG が無ければ簡易チャートを作成（フォールバック）
+          if [ ! -f "${SNAPSHOT_PNG}" ]; then
+            echo "[fallback] ${SNAPSHOT_PNG} を生成します"
+            python - <<'PY'
+import pandas as pd, matplotlib.pyplot as plt, pathlib, json
+csv_path = pathlib.Path("docs/outputs/astra4_intraday.csv")
+png_path = pathlib.Path("docs/outputs/astra4_intraday.png")
+df = pd.read_csv(csv_path)
+num_cols = [c for c in df.columns if c != "Datetime"]
+if len(num_cols) == 0:
+    x, y = [0], [0]
+else:
+    y = df[num_cols].mean(axis=1).tolist()
+    x = range(len(y))
+plt.figure(figsize=(8,3), dpi=160)
+plt.plot(list(x), list(y))
+plt.title("ASTRA4 Intraday (fallback)")
+plt.tight_layout()
+png_path.parent.mkdir(parents=True, exist_ok=True)
+plt.savefig(png_path)
+PY
+          fi
 
       - name: Upload artifacts (for debug)
         if: always()
@@ -127,9 +110,8 @@ jobs:
         with:
           name: astra4_intraday_artifacts
           path: |
-            ${OUT_JSON}
-            ${OUT_TEXT}
-            ${SNAPSHOT_PNG}
+            ${{ env.OUT_TEXT }}
+            ${{ env.SNAPSHOT_PNG }}
 
       - name: Checkout site repo (for publishing)
         uses: actions/checkout@v4
@@ -141,22 +123,22 @@ jobs:
 
       - name: Copy snapshot files into site tree
         run: |
-          set -eu
+          set -e
           mkdir -p "site/${PUBLISH_DIR}"
-          cp -f "${OUT_JSON}" "site/${PUBLISH_DIR}/stats.json"
           cp -f "${SNAPSHOT_PNG}" "site/${PUBLISH_DIR}/intraday.png"
-          # 1d チャート等の長期画像も後で追加するならこのブロックで
+          # stats.json は OUT_JSON をそのまま同期
+          cp -f "${OUT_JSON}" "site/${PUBLISH_DIR}/stats.json"
 
       - name: Commit & push site charts
+        working-directory: site
         run: |
-          set -eu
-          cd site
-          git config user.name  "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add "${PUBLISH_DIR}"
+          set -e
+          git config user.name  "sakura-bot"
+          git config user.email "bot@sakura-index.local"
+          git add "${PUBLISH_DIR}/intraday.png" "${PUBLISH_DIR}/stats.json" || true
           if git diff --cached --quiet; then
             echo "No site changes."
           else
-            git commit -m "chore(site): update ${INDEX_KEY} intraday (${GITHUB_RUN_ID})"
-            git push origin "${SITE_BRANCH}"
+            git commit -m "chore(ASTRA4): publish intraday snapshot & stats"
+            git push origin "${{ env.SITE_BRANCH }}"
           fi
