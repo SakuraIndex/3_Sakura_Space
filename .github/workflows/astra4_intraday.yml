@@ -105,6 +105,7 @@ jobs:
             --dt-col "${DT_COL}" \
             --value-type "${VALUE_TYPE_IN}"
 
+          # フォールバック（PNGがない場合だけ生成）
           if [ ! -f "${SNAPSHOT_PNG}" ]; then
             echo "[fallback] create simple PNG → ${SNAPSHOT_PNG}"
 python - <<'PY'
