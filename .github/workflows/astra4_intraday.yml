@@ -30,12 +30,10 @@ env:
   DT_COL: Datetime
   BASIS: prev_close
 
-  # 出力ファイル（このリポ内）
   OUT_JSON: docs/charts/astra4_stats.json
   OUT_TEXT: docs/charts/astra4_post_intraday.txt
   SNAPSHOT_PNG: docs/charts/astra4_1d.png
 
-  # 公開サイト（外部）設定
   SITE_REPO: SakuraIndex/SakuraIndexSite
   SITE_BRANCH: main
   PUBLISH_DIR: docs/charts/ASTRA4
@@ -85,6 +83,15 @@ jobs:
         run: |
           TZ=Asia/Tokyo date +%H | awk '{ if($1 < 12) print "variant=am"; else print "variant=pm" }' >> "$GITHUB_OUTPUT"
 
+      # ★ 追加: すべての出力先ディレクトリを先に作成（Wガード）
+      - name: Prepare output directories
+        shell: bash
+        run: |
+          set -e
+          mkdir -p "$(dirname "${OUT_JSON}")"
+          mkdir -p "$(dirname "${OUT_TEXT}")"
+          mkdir -p "$(dirname "${SNAPSHOT_PNG}")"
+
       - name: Generate intraday snapshot and post (with fallback)
         shell: bash
         env:
@@ -112,10 +119,10 @@ jobs:
             --dt-col "${DT_COL}" \
             --value-type "${VALUE_TYPE}"
 
-          # --- Fallback: スナップショットPNGが出ていない場合は簡易PNGを生成 ---
+          # --- Fallback: PNGが無ければ簡易PNGを作る（二重ガードで mkdir も実行）
           if [ ! -f "${SNAPSHOT_PNG}" ]; then
             echo "[fallback] create simple PNG -> ${SNAPSHOT_PNG}"
-            python -c "import pandas as pd, matplotlib.pyplot as plt, pathlib as P; csv=P.Path('docs/outputs/astra4_intraday.csv'); png=P.Path('docs/charts/astra4_1d.png'); df=pd.read_csv(csv); cols=[c for c in df.columns if c!='Datetime']; y=[0] if not cols else df[cols].mean(axis=1).tolist(); x=list(range(len(y))); plt.figure(figsize=(8,3), dpi=160); plt.plot(x,y); plt.title('ASTRA4 Intraday (fallback)'); plt.tight_layout(); png.parent.mkdir(parents=True, exist_ok=True); plt.savefig(png)"
+            python -c "import pandas as pd, matplotlib.pyplot as plt, pathlib as P; csv=P.Path('docs/outputs/astra4_intraday.csv'); png=P.Path('docs/charts/astra4_1d.png'); png.parent.mkdir(parents=True, exist_ok=True); df=pd.read_csv(csv); cols=[c for c in df.columns if c!='Datetime']; y=[0] if not cols else df[cols].mean(axis=1).tolist(); x=list(range(len(y))); plt.figure(figsize=(8,3), dpi=160); plt.plot(x,y); plt.title('ASTRA4 Intraday (fallback)'); plt.tight_layout(); plt.savefig(png)"
           fi
 
       - name: Upload artifacts (for debug)
@@ -144,7 +151,6 @@ jobs:
           cp -f "../${OUT_JSON}"      "${PUBLISH_DIR}/astra4_stats.json"
           cp -f "../${OUT_TEXT}"      "${PUBLISH_DIR}/astra4_post_intraday.txt"
           cp -f "../${SNAPSHOT_PNG}"  "${PUBLISH_DIR}/astra4_1d.png"
-          echo "Site tree updated: ${PUBLISH_DIR}"
           ls -l "${PUBLISH_DIR}"
 
       - name: Commit & push site charts
