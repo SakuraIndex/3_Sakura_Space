@@ -50,8 +50,8 @@ jobs:
       - name: Verify inputs & files
         run: |
           set -e
-          test -f "${CSV}" || (echo "Missing CSV: ${CSV}" && exit 1)
-          test -f scripts/make_intraday_post.py || (echo "Missing script: scripts/make_intraday_post.py" && exit 1)
+          test -f "${CSV}" || { echo "Missing CSV: ${CSV}"; exit 1; }
+          test -f scripts/make_intraday_post.py || { echo "Missing script: scripts/make_intraday_post.py"; exit 1; }
 
       - name: Decide publish variant (AM / PM)
         id: ampm
@@ -89,35 +89,16 @@ jobs:
             --dt-col "${DT_COL}" \
             --value-type "${VALUE_TYPE_IN}"
 
-          # PNG が無ければ簡易チャートをフォールバック生成
+          # PNG が無ければ簡易チャートをフォールバック生成（python -c で YAML 衝突回避）
           if [ ! -f "${SNAPSHOT_PNG}" ]; then
             echo "[fallback] ${SNAPSHOT_PNG} を生成します"
-            cat > _fallback.py <<'PY'
-import pathlib
-import pandas as pd
-import matplotlib.pyplot as plt
-
-csv_path = pathlib.Path("docs/outputs/astra4_intraday.csv")
-png_path = pathlib.Path("docs/outputs/astra4_intraday.png")
-
-df = pd.read_csv(csv_path)
-num_cols = [c for c in df.columns if c != "Datetime"]
-
-if len(num_cols) == 0:
-    y = [0]
-    x = [0]
-else:
-    y = df[num_cols].mean(axis=1).tolist()
-    x = range(len(y))
-
-plt.figure(figsize=(8,3), dpi=160)
-plt.plot(list(x), list(y))
-plt.title("ASTRA4 Intraday (fallback)")
-plt.tight_layout()
-png_path.parent.mkdir(parents=True, exist_ok=True)
-plt.savefig(png_path)
-PY
-            python _fallback.py
+            python -c "import pandas as pd, matplotlib.pyplot as plt, pathlib; \
+p=pathlib.Path('${CSV}'); q=pathlib.Path('${SNAPSHOT_PNG}'); \
+df=pd.read_csv(p); cols=[c for c in df.columns if c!='${DT_COL}']; \
+y=[0] if len(cols)==0 else df[cols].mean(axis=1).tolist(); \
+plt.figure(figsize=(8,3), dpi=160); plt.plot(range(len(y)), y); \
+plt.title('ASTRA4 Intraday (fallback)'); plt.tight_layout(); \
+q.parent.mkdir(parents=True, exist_ok=True); plt.savefig(q)"
           fi
 
       - name: Upload artifacts (for debug)
@@ -142,8 +123,9 @@ PY
         run: |
           set -e
           mkdir -p "site/${PUBLISH_DIR}"
-          cp -f "${SNAPSHOT_PNG}" "site/${PUBLISH_DIR}/intraday.png"
-          cp -f "${OUT_JSON}"    "site/${PUBLISH_DIR}/stats.json"
+          # intraday.png は存在すれば反映、無ければスキップ（このステップ以降は stats.json を使う想定）
+          [ -f "${SNAPSHOT_PNG}" ] && cp -f "${SNAPSHOT_PNG}" "site/${PUBLISH_DIR}/intraday.png" || true
+          cp -f "${OUT_JSON}" "site/${PUBLISH_DIR}/stats.json"
 
       - name: Commit & push site charts
         working-directory: site
@@ -152,7 +134,8 @@ PY
           set -e
           git config user.name  "sakura-bot"
           git config user.email "bot@sakura-index.local"
-          git add "${PUBLISH_DIR}/intraday.png" "${PUBLISH_DIR}/stats.json" || true
+          git add "${PUBLISH_DIR}/stats.json" || true
+          [ -f "${PUBLISH_DIR}/intraday.png" ] && git add "${PUBLISH_DIR}/intraday.png" || true
           if git diff --cached --quiet; then
             echo "No site changes."
           else
