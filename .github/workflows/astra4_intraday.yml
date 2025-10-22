@@ -12,11 +12,11 @@ on:
         required: true
         default: "15:30"
       day_anchor:
-        description: "Day anchor time (HH:MM JST)"
+        description: "Day anchor (HH:MM JST)"
         required: true
         default: "09:00"
       value_type:
-        description: "Change value type: percent | ratio"
+        description: "Value type (percent | ratio)"
         required: true
         default: "percent"
 
@@ -62,8 +62,8 @@ jobs:
       - name: Verify inputs & files
         run: |
           set -e
-          test -f "${CSV}" || (echo "Missing CSV: ${CSV}" && exit 1)
-          test -f scripts/make_intraday_post.py || (echo "Missing script: scripts/make_intraday_post.py" && exit 1)
+          test -f "${CSV}" || { echo "Missing CSV: ${CSV}"; exit 1; }
+          test -f scripts/make_intraday_post.py || { echo "Missing script: scripts/make_intraday_post.py"; exit 1; }
 
       - name: Decide publish variant (AM / PM)
         id: ampm
@@ -79,6 +79,7 @@ jobs:
           fi
 
       - name: Generate intraday snapshot and post (with fallback)
+        shell: bash
         env:
           SESSION_START: ${{ inputs.session_start }}
           SESSION_END:   ${{ inputs.session_end }}
@@ -87,12 +88,9 @@ jobs:
           OUT_JSON:      docs/outputs/astra4_stats.json
           OUT_TEXT:      docs/outputs/astra4_post_intraday.txt
           SNAPSHOT_PNG:  docs/outputs/astra4_intraday.png
-        shell: bash
         run: |
           set -euo pipefail
           echo "=== Generate ${INDEX_KEY} intraday snapshot ==="
-
-          # main generator
           python scripts/make_intraday_post.py \
             --index-key "${INDEX_KEY}" \
             --csv "${CSV}" \
@@ -107,9 +105,8 @@ jobs:
             --dt-col "${DT_COL}" \
             --value-type "${VALUE_TYPE_IN}"
 
-          # fallback PNG (only if missing)
           if [ ! -f "${SNAPSHOT_PNG}" ]; then
-            echo "[fallback] build simple PNG → ${SNAPSHOT_PNG}"
+            echo "[fallback] create simple PNG → ${SNAPSHOT_PNG}"
 python - <<'PY'
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -161,9 +158,9 @@ PY
         run: |
           set -e
           mkdir -p "site/${PUBLISH_DIR}"
-          cp -f docs/outputs/astra4_intraday.png       "site/${PUBLISH_DIR}/astra4_1d.png"             || true
-          cp -f docs/outputs/astra4_stats.json         "site/${PUBLISH_DIR}/astra4_stats.json"         || true
-          cp -f docs/outputs/astra4_post_intraday.txt  "site/${PUBLISH_DIR}/astra4_post_intraday.txt"  || true
+          cp -f docs/outputs/astra4_intraday.png       "site/${PUBLISH_DIR}/astra4_1d.png"            || true
+          cp -f docs/outputs/astra4_stats.json         "site/${PUBLISH_DIR}/astra4_stats.json"        || true
+          cp -f docs/outputs/astra4_post_intraday.txt  "site/${PUBLISH_DIR}/astra4_post_intraday.txt" || true
 
       - name: Commit & push site charts
         shell: bash
