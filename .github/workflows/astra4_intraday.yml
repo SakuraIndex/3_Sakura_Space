@@ -1,4 +1,4 @@
-name: <INDEX> • intraday + publish (JST 09:00–15:30)
+name: ASTRA4 • intraday + publish (JST 09:00–15:30)
 
 on:
   workflow_dispatch:
@@ -24,8 +24,9 @@ on:
         required: false
         default: ""
   schedule:
-    - cron: "35 2 * * 1-5"   # JST 11:35
-    - cron: "35 6 * * 1-5"   # JST 15:35
+    - cron: "35 2 * * 1-5"
+    - cron: "35 6 * * 1-5"
+
 
 permissions:
   contents: write
