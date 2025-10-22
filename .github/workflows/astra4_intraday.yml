@@ -20,13 +20,12 @@ on:
         required: true
         default: "prev_close"
       value_type:
-        description: "Value type: ratio | percent (blank = script default)"
-        required: false
-        default: ""
-
+        description: "Value type: ratio | percent"
+        required: true
+        default: "percent"
   schedule:
-    - cron: "35 2 * * 1-5"   # JST 11:35
-    - cron: "35 6 * * 1-5"   # JST 15:35
+    - cron: "35 2 * * 1-5"   # JST 11:35 → AMスナップ
+    - cron: "35 6 * * 1-5"   # JST 15:35 → PM(通常)
 
 permissions:
   contents: write
@@ -35,23 +34,22 @@ env:
   INDEX_KEY: ASTRA4
   LABEL: ASTRA4
   CSV: docs/outputs/astra4_intraday.csv
-  DT_COL: "Datetime"
   OUT_JSON: docs/outputs/astra4_stats.json
   OUT_TEXT: docs/outputs/astra4_post_intraday.txt
   SNAPSHOT_PNG: docs/outputs/astra4_intraday.png
-
+  DT_COL: "Datetime"
   SITE_REPO: SakuraIndex/Sakura-Index-Site
   SITE_BRANCH: main
+  PUBLISH_DIR: charts/${{ env.INDEX_KEY }}
+
+concurrency:
+  group: intraday-${{ github.ref }}-${{ env.INDEX_KEY }}
+  cancel-in-progress: false
 
 jobs:
   build:
     runs-on: ubuntu-latest
     timeout-minutes: 12
-
-    concurrency:
-      group: intraday-${{ github.ref }}-ASTRA4
-      cancel-in-progress: false
-
     steps:
       - name: Checkout (this repo)
         uses: actions/checkout@v4
@@ -71,9 +69,20 @@ jobs:
       - name: Verify inputs & files
         run: |
           set -e
-          test -f scripts/make_intraday_post.py || (echo "Missing scripts/make_intraday_post.py" && exit 1)
-          test -f "${CSV}" || (echo "Missing CSV: ${CSV}" && exit 1)
-          echo "OK: ${CSV}"
+          test -f scripts/make_intraday_post.py
+          test -f "${CSV}"
+
+      - name: Decide publish variant (AM / PM)
+        shell: bash
+        env:
+          RUN_SCHEDULE: ${{ github.event.schedule }}
+        run: |
+          if [[ "${RUN_SCHEDULE}" == "35 2 * * 1-5" ]]; then
+            echo "PUBLISH_VARIANT=am" >> "$GITHUB_ENV"
+          else
+            echo "PUBLISH_VARIANT=pm" >> "$GITHUB_ENV"
+          fi
+          echo "VALUE_TYPE=${{ inputs.value_type || 'percent' }}" >> "$GITHUB_ENV"
 
       - name: Generate intraday snapshot and post
         env:
@@ -81,16 +90,10 @@ jobs:
           SESSION_END:   ${{ inputs.session_end   || '15:30' }}
           DAY_ANCHOR:    ${{ inputs.day_anchor    || '09:00' }}
           BASIS:         ${{ inputs.basis         || 'prev_close' }}
-          VALUE_TYPE:    ${{ inputs.value_type    || '' }}
+          VALUE_TYPE:    ${{ env.VALUE_TYPE }}
         run: |
           set -euo pipefail
           echo "=== Generate ${INDEX_KEY} intraday snapshot ==="
-
-          VT_ARGS=""
-          if [ -n "${VALUE_TYPE}" ]; then
-            VT_ARGS="--value-type ${VALUE_TYPE}"
-          fi
-
           python scripts/make_intraday_post.py \
             --index-key "${INDEX_KEY}" \
             --csv "${CSV}" \
@@ -101,39 +104,50 @@ jobs:
             --session-end "${SESSION_END}" \
             --day-anchor "${DAY_ANCHOR}" \
             --basis "${BASIS}" \
+            --value-type "${VALUE_TYPE}" \
             --dt-col "${DT_COL}" \
-            --label "${LABEL}" \
-            ${VT_ARGS}
+            --label "${LABEL}"
 
-      - name: Upload artifacts (for debug)
+      - name: Upload artifacts (debug)
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: astra4_intraday_artifacts
           path: |
-            ${{ env.OUT_JSON }}
-            ${{ env.OUT_TEXT }}
-            ${{ env.SNAPSHOT_PNG }}
-          if-no-files-found: error
+            ${OUT_TEXT}
+            ${OUT_JSON}
+            ${SNAPSHOT_PNG}
+          if-no-files-found: ignore
           retention-days: 3
 
+      # ▼ サイト公開
       - name: Checkout site repo (for publishing)
         uses: actions/checkout@v4
         with:
           repository: ${{ env.SITE_REPO }}
-          ref: ${{ env.SITE_BRANCH }}
           token: ${{ secrets.SITE_PAT }}
+          ref: ${{ env.SITE_BRANCH }}
           path: site
 
-      - name: Copy snapshot files into site tree
+      - name: Copy snapshot files into site tree (with AM/PM & long-term)
         run: |
           set -e
-          PUBLISH_DIR="docs/charts/${INDEX_KEY}"
           mkdir -p "site/${PUBLISH_DIR}"
-          cp -f "${SNAPSHOT_PNG}" "site/${PUBLISH_DIR}/intraday.png"
-          cp -f "${OUT_TEXT}"     "site/${PUBLISH_DIR}/post_intraday.txt"
-          cp -f "${OUT_JSON}"     "site/${PUBLISH_DIR}/stats.json"
-          echo "Copied to site/${PUBLISH_DIR}"
+
+          # AM/PM: intraday / intraday_am に振り分け
+          if [ "${PUBLISH_VARIANT}" = "am" ]; then
+            cp -f "${SNAPSHOT_PNG}" "site/${PUBLISH_DIR}/intraday_am.png"
+          else
+            cp -f "${SNAPSHOT_PNG}" "site/${PUBLISH_DIR}/intraday.png"
+          fi
+
+          # 長期チャートがあれば取り込む（存在チェック）
+          for T in 7d 1m 1y; do
+            F="docs/outputs/astra4_${T}.png"
+            if [ -f "${F}" ]; then
+              cp -f "${F}" "site/${PUBLISH_DIR}/${T}.png"
+            fi
+          done
 
       - name: Commit & push site charts
         working-directory: site
@@ -141,10 +155,10 @@ jobs:
           set -e
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add docs/charts/${INDEX_KEY}/intraday.png docs/charts/${INDEX_KEY}/post_intraday.txt docs/charts/${INDEX_KEY}/stats.json || true
+          git add "${PUBLISH_DIR}" || true
           if ! git diff --cached --quiet; then
-            git commit -m "chore(charts): update ${INDEX_KEY} intraday"
-            git push origin "${{ env.SITE_BRANCH }}"
+            git commit -m "publish(${ {env.INDEX_KEY} }): intraday ${PUBLISH_VARIANT}"
+            git push origin "${SITE_BRANCH}"
           else
             echo "No site changes."
           fi
