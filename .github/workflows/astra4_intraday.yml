@@ -92,7 +92,7 @@ jobs:
           set -euo pipefail
           echo "=== Generate ${INDEX_KEY} intraday snapshot ==="
 
-          # 本命生成（make_intraday_post.py）
+          # main generator
           python scripts/make_intraday_post.py \
             --index-key "${INDEX_KEY}" \
             --csv "${CSV}" \
@@ -107,10 +107,10 @@ jobs:
             --dt-col "${DT_COL}" \
             --value-type "${VALUE_TYPE_IN}"
 
-          # フォールバック：PNGが無い場合だけ簡易PNGを作る
+          # fallback PNG (only if missing)
           if [ ! -f "${SNAPSHOT_PNG}" ]; then
-            echo "[fallback] ${SNAPSHOT_PNG} を生成します"
-            cat > _fallback_astra4.py <<'PY'
+            echo "[fallback] build simple PNG → ${SNAPSHOT_PNG}"
+python - <<'PY'
 import pandas as pd
 import matplotlib.pyplot as plt
 from pathlib import Path
@@ -135,7 +135,6 @@ plt.tight_layout()
 png_path.parent.mkdir(parents=True, exist_ok=True)
 plt.savefig(png_path)
 PY
-            python _fallback_astra4.py
           fi
 
       - name: Upload artifacts (for debug)
@@ -162,9 +161,9 @@ PY
         run: |
           set -e
           mkdir -p "site/${PUBLISH_DIR}"
-          cp -f docs/outputs/astra4_intraday.png        "site/${PUBLISH_DIR}/astra4_1d.png"                || true
-          cp -f docs/outputs/astra4_stats.json          "site/${PUBLISH_DIR}/astra4_stats.json"            || true
-          cp -f docs/outputs/astra4_post_intraday.txt   "site/${PUBLISH_DIR}/astra4_post_intraday.txt"     || true
+          cp -f docs/outputs/astra4_intraday.png       "site/${PUBLISH_DIR}/astra4_1d.png"             || true
+          cp -f docs/outputs/astra4_stats.json         "site/${PUBLISH_DIR}/astra4_stats.json"         || true
+          cp -f docs/outputs/astra4_post_intraday.txt  "site/${PUBLISH_DIR}/astra4_post_intraday.txt"  || true
 
       - name: Commit & push site charts
         shell: bash
