@@ -12,26 +12,31 @@ on:
         required: true
         default: "15:30"
       day_anchor:
-        description: "Day anchor (HH:MM JST)"
+        description: "Day anchor time (HH:MM JST)"
         required: true
         default: "09:00"
       value_type:
-        description: "Value type (percent | ratio)"
+        description: "Value type"
         required: true
         default: "percent"
+        type: choice
+        options: [percent, ratio]
 
 permissions:
   contents: write
 
 env:
+  # 固定値（指数ごとに変更）
   INDEX_KEY: ASTRA4
   LABEL: ASTRA4
   CSV: docs/outputs/astra4_intraday.csv
   DT_COL: Datetime
   BASIS: prev_close
+
+  # 公開サイト（必要に応じて変更）
   SITE_REPO: SakuraIndex/Sakura-Index-Site
   SITE_BRANCH: main
-  PUBLISH_DIR: docs/charts
+  PUBLISH_DIR: docs/charts/${{ env.INDEX_KEY }}
 
 jobs:
   build:
@@ -41,8 +46,6 @@ jobs:
     steps:
       - name: Checkout (this repo)
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
       - name: Setup Python 3.11
         uses: actions/setup-python@v5
@@ -50,33 +53,21 @@ jobs:
           python-version: "3.11"
 
       - name: Install dependencies
+        shell: bash
         run: |
           set -e
           if [ -f requirements.txt ]; then
-            python -m pip install --upgrade pip
-            pip install -r requirements.txt
+            python -m pip install -r requirements.txt
           else
-            pip install pandas matplotlib
+            python -m pip install pandas matplotlib
           fi
 
       - name: Verify inputs & files
+        shell: bash
         run: |
           set -e
           test -f "${CSV}" || { echo "Missing CSV: ${CSV}"; exit 1; }
           test -f scripts/make_intraday_post.py || { echo "Missing script: scripts/make_intraday_post.py"; exit 1; }
-
-      - name: Decide publish variant (AM / PM)
-        id: ampm
-        shell: bash
-        env:
-          TZ: Asia/Tokyo
-        run: |
-          H=$(date +%H)
-          if [ "$H" -lt 12 ]; then
-            echo "variant=am" >> "$GITHUB_OUTPUT"
-          else
-            echo "variant=pm" >> "$GITHUB_OUTPUT"
-          fi
 
       - name: Generate intraday snapshot and post (with fallback)
         shell: bash
@@ -84,10 +75,10 @@ jobs:
           SESSION_START: ${{ inputs.session_start }}
           SESSION_END:   ${{ inputs.session_end }}
           DAY_ANCHOR:    ${{ inputs.day_anchor }}
-          VALUE_TYPE_IN: ${{ inputs.value_type }}
-          OUT_JSON:      docs/outputs/astra4_stats.json
-          OUT_TEXT:      docs/outputs/astra4_post_intraday.txt
-          SNAPSHOT_PNG:  docs/outputs/astra4_intraday.png
+          VALUE_TYPE:    ${{ inputs.value_type }}
+          OUT_JSON:      docs/charts/astra4_stats.json
+          OUT_TEXT:      docs/charts/astra4_post_intraday.txt
+          SNAPSHOT_PNG:  docs/charts/astra4_1d.png
         run: |
           set -euo pipefail
           echo "=== Generate ${INDEX_KEY} intraday snapshot ==="
@@ -103,18 +94,18 @@ jobs:
             --basis "${BASIS}" \
             --label "${LABEL}" \
             --dt-col "${DT_COL}" \
-            --value-type "${VALUE_TYPE_IN}"
+            --value-type "${VALUE_TYPE}"
 
-          # --- fallback PNG generation ---
+          # --- fallback PNG generation (if snapshot was not created) ---
           if [ ! -f "${SNAPSHOT_PNG}" ]; then
             echo "[fallback] create simple PNG → ${SNAPSHOT_PNG}"
-python - <<'PY'
+            cat > _fallback_astra4.py <<'PY'
 import pandas as pd
 import matplotlib.pyplot as plt
 from pathlib import Path
 
 csv_path = Path("docs/outputs/astra4_intraday.csv")
-png_path = Path("docs/outputs/astra4_intraday.png")
+png_path = Path("docs/charts/astra4_1d.png")
 
 df = pd.read_csv(csv_path)
 num_cols = [c for c in df.columns if c != "Datetime"]
@@ -133,6 +124,7 @@ plt.tight_layout()
 png_path.parent.mkdir(parents=True, exist_ok=True)
 plt.savefig(png_path)
 PY
+            python _fallback_astra4.py
           fi
 
       - name: Upload artifacts (for debug)
@@ -141,39 +133,39 @@ PY
         with:
           name: astra4_intraday_artifacts
           path: |
-            docs/outputs/astra4_stats.json
-            docs/outputs/astra4_post_intraday.txt
-            docs/outputs/astra4_intraday.png
+            docs/charts/astra4_post_intraday.txt
+            docs/charts/astra4_1d.png
+            docs/charts/astra4_stats.json
 
       - name: Checkout site repo (for publishing)
         uses: actions/checkout@v4
         with:
           repository: ${{ env.SITE_REPO }}
           ref: ${{ env.SITE_BRANCH }}
-          token: ${{ secrets.SITE_PAT }}
+          token: ${{ secrets.GITHUB_TOKEN }}
           path: site
-          fetch-depth: 0
 
-      - name: Copy snapshot files into site tree (with PNG auto-detect)
+      - name: Copy snapshot files into site tree
         shell: bash
         run: |
           set -e
           mkdir -p "site/${PUBLISH_DIR}"
-          cp -f docs/outputs/astra4_intraday.png       "site/${PUBLISH_DIR}/astra4_1d.png"            || true
-          cp -f docs/outputs/astra4_stats.json         "site/${PUBLISH_DIR}/astra4_stats.json"        || true
-          cp -f docs/outputs/astra4_post_intraday.txt  "site/${PUBLISH_DIR}/astra4_post_intraday.txt" || true
+          cp -f docs/charts/astra4_1d.png        "site/${PUBLISH_DIR}/"
+          cp -f docs/charts/astra4_stats.json    "site/${PUBLISH_DIR}/"
+          # （必要ならテキストも）
+          cp -f docs/charts/astra4_post_intraday.txt "site/${PUBLISH_DIR}/" || true
 
       - name: Commit & push site charts
         shell: bash
         working-directory: site
         run: |
           set -e
-          git config user.name  "sakuraindex-bot"
-          git config user.email "bot@sakuraindex.local"
-          git add ${PUBLISH_DIR}/astra4_*
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
           if git diff --cached --quiet; then
-            echo "No site updates."
-            exit 0
+            echo "No site changes."
+          else
+            git commit -m "ASTRA4: intraday charts ($(date -u +'%Y-%m-%dT%H:%M:%SZ'))"
+            git push origin "${SITE_BRANCH}"
           fi
-          git commit -m "ASTRA4: update intraday snapshot & stats (${{ steps.ampm.outputs.variant }})"
-          git push origin "${SITE_BRANCH}"
