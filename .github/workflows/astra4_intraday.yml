@@ -20,7 +20,7 @@ on:
         required: true
         default: "prev_close"
       value_type:
-        description: "Value type: ratio | percent (override default)"
+        description: "Value type: ratio | percent (blank = script default)"
         required: false
         default: ""
 
@@ -40,7 +40,7 @@ env:
   OUT_TEXT: docs/outputs/astra4_post_intraday.txt
   SNAPSHOT_PNG: docs/outputs/astra4_intraday.png
 
-  # サイト設定
+  # Site repo
   SITE_REPO: SakuraIndex/Sakura-Index-Site
   SITE_BRANCH: main
 
@@ -86,6 +86,12 @@ jobs:
         run: |
           set -euo pipefail
           echo "=== Generate ${INDEX_KEY} intraday snapshot ==="
+
+          VT_ARGS=""
+          if [ -n "${VALUE_TYPE}" ]; then
+            VT_ARGS="--value-type ${VALUE_TYPE}"
+          fi
+
           python scripts/make_intraday_post.py \
             --index-key "${INDEX_KEY}" \
             --csv "${CSV}" \
@@ -96,9 +102,9 @@ jobs:
             --session-end "${SESSION_END}" \
             --day-anchor "${DAY_ANCHOR}" \
             --basis "${BASIS}" \
-            --value-type "${VALUE_TYPE}" \
             --dt-col "${DT_COL}" \
-            --label "${LABEL}"
+            --label "${LABEL}" \
+            ${VT_ARGS}
 
       - name: Upload artifacts (debug)
         if: always()
