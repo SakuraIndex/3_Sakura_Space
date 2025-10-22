@@ -31,29 +31,33 @@ on:
 permissions:
   contents: write
 
+# ここは “固定値のみ” を定義（式は使わない）
 env:
-  # ← ここを指数ごとに置き換え
-  INDEX_KEY: ASTRA4        # 例
-  LABEL: ASTRA4            # 例
-  CSV: docs/outputs/astra4_intraday.csv   # 例
-  DT_COL: "Datetime"       # 例（コロン含む列名なら必ずクォート）※"Unnamed: 0" の場合は置き換え
+  INDEX_KEY: ASTRA4
+  LABEL: ASTRA4
+  CSV: docs/outputs/astra4_intraday.csv
+  DT_COL: "Datetime"                 # 例: "Unnamed: 0" に合わせて変更可
   OUT_JSON: docs/outputs/astra4_stats.json
   OUT_TEXT: docs/outputs/astra4_post_intraday.txt
   SNAPSHOT_PNG: docs/outputs/astra4_intraday.png
 
-  # 公式サイト公開設定
+  # 公開先サイト
   SITE_REPO: SakuraIndex/Sakura-Index-Site
   SITE_BRANCH: main
-  PUBLISH_DIR: docs/charts/${{ env.INDEX_KEY }}
-
-concurrency:
-  group: intraday-${{ github.ref }}-${{ env.INDEX_KEY }}
-  cancel-in-progress: false
 
 jobs:
   build:
     runs-on: ubuntu-latest
     timeout-minutes: 12
+
+    # ここで式を使って OK（env が参照可）
+    concurrency:
+      group: intraday-${{ github.ref }}-${{ env.INDEX_KEY }}
+      cancel-in-progress: false
+
+    # PUBLISH_DIR もジョブ側の env で、ここなら env が参照可
+    env:
+      PUBLISH_DIR: docs/charts/${{ env.INDEX_KEY }}
 
     steps:
       - name: Checkout (this repo)
@@ -114,7 +118,7 @@ jobs:
           if-no-files-found: error
           retention-days: 3
 
-      # ここからサイトへ公開
+      # サイトへ公開
       - name: Checkout site repo (for publishing)
         uses: actions/checkout@v4
         with:
