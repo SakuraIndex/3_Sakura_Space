@@ -26,14 +26,14 @@ permissions:
   contents: write
 
 env:
-  # 固定値（指数ごとに変更）
+  # === 指数ごとの固定 ===
   INDEX_KEY: ASTRA4
   LABEL: ASTRA4
   CSV: docs/outputs/astra4_intraday.csv
   DT_COL: Datetime
   BASIS: prev_close
 
-  # 公開サイト（必要に応じて変更）
+  # === 公開サイト設定（必要なら調整）===
   SITE_REPO: SakuraIndex/Sakura-Index-Site
   SITE_BRANCH: main
   PUBLISH_DIR: docs/charts/${{ env.INDEX_KEY }}
@@ -96,35 +96,15 @@ jobs:
             --dt-col "${DT_COL}" \
             --value-type "${VALUE_TYPE}"
 
-          # --- fallback PNG generation (if snapshot was not created) ---
+          # --- Fallback: PNGが無い場合は簡易チャートを生成 ---
           if [ ! -f "${SNAPSHOT_PNG}" ]; then
-            echo "[fallback] create simple PNG → ${SNAPSHOT_PNG}"
-            cat > _fallback_astra4.py <<'PY'
-import pandas as pd
-import matplotlib.pyplot as plt
-from pathlib import Path
-
-csv_path = Path("docs/outputs/astra4_intraday.csv")
-png_path = Path("docs/charts/astra4_1d.png")
-
-df = pd.read_csv(csv_path)
-num_cols = [c for c in df.columns if c != "Datetime"]
-
-if len(num_cols) == 0:
-    y = [0]
-    x = [0]
-else:
-    y = df[num_cols].mean(axis=1).tolist()
-    x = list(range(len(y)))
-
-plt.figure(figsize=(8,3), dpi=160)
-plt.plot(x, y)
-plt.title("ASTRA4 Intraday (fallback)")
-plt.tight_layout()
-png_path.parent.mkdir(parents=True, exist_ok=True)
-plt.savefig(png_path)
-PY
-            python _fallback_astra4.py
+            echo "[fallback] create simple PNG -> ${SNAPSHOT_PNG}"
+            python -c "import pandas as pd, matplotlib.pyplot as plt, pathlib as P; \
+csv=P.Path('docs/outputs/astra4_intraday.csv'); png=P.Path('docs/charts/astra4_1d.png'); \
+df=pd.read_csv(csv); cols=[c for c in df.columns if c!='Datetime']; \
+y=[0] if not cols else df[cols].mean(axis=1).tolist(); x=list(range(len(y))); \
+plt.figure(figsize=(8,3), dpi=160); plt.plot(x,y); plt.title('ASTRA4 Intraday (fallback)'); plt.tight_layout(); \
+png.parent.mkdir(parents=True, exist_ok=True); plt.savefig(png)"
           fi
 
       - name: Upload artifacts (for debug)
@@ -150,10 +130,9 @@ PY
         run: |
           set -e
           mkdir -p "site/${PUBLISH_DIR}"
-          cp -f docs/charts/astra4_1d.png        "site/${PUBLISH_DIR}/"
-          cp -f docs/charts/astra4_stats.json    "site/${PUBLISH_DIR}/"
-          # （必要ならテキストも）
-          cp -f docs/charts/astra4_post_intraday.txt "site/${PUBLISH_DIR}/" || true
+          cp -f docs/charts/astra4_1d.png             "site/${PUBLISH_DIR}/"
+          cp -f docs/charts/astra4_stats.json         "site/${PUBLISH_DIR}/"
+          cp -f docs/charts/astra4_post_intraday.txt  "site/${PUBLISH_DIR}/" || true
 
       - name: Commit & push site charts
         shell: bash
