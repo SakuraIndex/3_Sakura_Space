@@ -53,10 +53,10 @@ jobs:
         run: |
           set -e
           if [ -f requirements.txt ]; then
-              python -m pip install --upgrade pip
-              pip install -r requirements.txt
+            python -m pip install --upgrade pip
+            pip install -r requirements.txt
           else
-              pip install pandas matplotlib
+            pip install pandas matplotlib
           fi
 
       - name: Verify inputs & files
@@ -73,9 +73,9 @@ jobs:
         run: |
           H=$(date +%H)
           if [ "$H" -lt 12 ]; then
-              echo "variant=am" >> "$GITHUB_OUTPUT"
+            echo "variant=am" >> "$GITHUB_OUTPUT"
           else
-              echo "variant=pm" >> "$GITHUB_OUTPUT"
+            echo "variant=pm" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Generate intraday snapshot and post (with fallback)
@@ -92,47 +92,50 @@ jobs:
           set -euo pipefail
           echo "=== Generate ${INDEX_KEY} intraday snapshot ==="
 
+          # 本命生成（make_intraday_post.py）
           python scripts/make_intraday_post.py \
-              --index-key "${INDEX_KEY}" \
-              --csv "${CSV}" \
-              --out-json "${OUT_JSON}" \
-              --out-text "${OUT_TEXT}" \
-              --snapshot-png "${SNAPSHOT_PNG}" \
-              --session-start "${SESSION_START}" \
-              --session-end "${SESSION_END}" \
-              --day-anchor "${DAY_ANCHOR}" \
-              --basis "${BASIS}" \
-              --label "${LABEL}" \
-              --dt-col "${DT_COL}" \
-              --value-type "${VALUE_TYPE_IN}"
+            --index-key "${INDEX_KEY}" \
+            --csv "${CSV}" \
+            --out-json "${OUT_JSON}" \
+            --out-text "${OUT_TEXT}" \
+            --snapshot-png "${SNAPSHOT_PNG}" \
+            --session-start "${SESSION_START}" \
+            --session-end "${SESSION_END}" \
+            --day-anchor "${DAY_ANCHOR}" \
+            --basis "${BASIS}" \
+            --label "${LABEL}" \
+            --dt-col "${DT_COL}" \
+            --value-type "${VALUE_TYPE_IN}"
 
-          # --- fallback PNG generation ---
+          # フォールバック：PNGが無い場合だけ簡易PNGを作る
           if [ ! -f "${SNAPSHOT_PNG}" ]; then
-              echo "[fallback] ${SNAPSHOT_PNG} を生成します"
-              python - <<'PY'
+            echo "[fallback] ${SNAPSHOT_PNG} を生成します"
+            cat > _fallback_astra4.py <<'PY'
 import pandas as pd
 import matplotlib.pyplot as plt
-import pathlib
+from pathlib import Path
 
-csv_path = pathlib.Path("docs/outputs/astra4_intraday.csv")
-png_path = pathlib.Path("docs/outputs/astra4_intraday.png")
+csv_path = Path("docs/outputs/astra4_intraday.csv")
+png_path = Path("docs/outputs/astra4_intraday.png")
 
 df = pd.read_csv(csv_path)
 num_cols = [c for c in df.columns if c != "Datetime"]
 
 if len(num_cols) == 0:
-    y = [0]; x = [0]
+    y = [0]
+    x = [0]
 else:
     y = df[num_cols].mean(axis=1).tolist()
-    x = range(len(y))
+    x = list(range(len(y)))
 
 plt.figure(figsize=(8,3), dpi=160)
-plt.plot(list(x), list(y))
+plt.plot(x, y)
 plt.title("ASTRA4 Intraday (fallback)")
 plt.tight_layout()
 png_path.parent.mkdir(parents=True, exist_ok=True)
 plt.savefig(png_path)
 PY
+            python _fallback_astra4.py
           fi
 
       - name: Upload artifacts (for debug)
@@ -158,22 +161,22 @@ PY
         shell: bash
         run: |
           set -e
-          mkdir -p site/${PUBLISH_DIR}
-          cp -f docs/outputs/astra4_intraday.png site/${PUBLISH_DIR}/astra4_1d.png || true
-          cp -f docs/outputs/astra4_stats.json site/${PUBLISH_DIR}/astra4_stats.json || true
-          cp -f docs/outputs/astra4_post_intraday.txt site/${PUBLISH_DIR}/astra4_post_intraday.txt || true
+          mkdir -p "site/${PUBLISH_DIR}"
+          cp -f docs/outputs/astra4_intraday.png        "site/${PUBLISH_DIR}/astra4_1d.png"                || true
+          cp -f docs/outputs/astra4_stats.json          "site/${PUBLISH_DIR}/astra4_stats.json"            || true
+          cp -f docs/outputs/astra4_post_intraday.txt   "site/${PUBLISH_DIR}/astra4_post_intraday.txt"     || true
 
       - name: Commit & push site charts
         shell: bash
         working-directory: site
         run: |
           set -e
-          git config user.name "sakuraindex-bot"
+          git config user.name  "sakuraindex-bot"
           git config user.email "bot@sakuraindex.local"
           git add ${PUBLISH_DIR}/astra4_*
           if git diff --cached --quiet; then
-              echo "No site updates."
-              exit 0
+            echo "No site updates."
+            exit 0
           fi
           git commit -m "ASTRA4: update intraday snapshot & stats (${{ steps.ampm.outputs.variant }})"
-          git push origin ${{ env.SITE_BRANCH }}
+          git push origin "${SITE_BRANCH}"
