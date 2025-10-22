@@ -16,21 +16,19 @@ on:
         required: true
         default: "09:00"
       value_type:
-        description: "Change value type"
+        description: "Change value type: percent | ratio"
         required: true
-        default: "percent"   # percent | ratio
+        default: "percent"
 
 permissions:
   contents: write
 
 env:
-  # === 固定パラメータ（ASTRA4 用）===
   INDEX_KEY: ASTRA4
   LABEL: ASTRA4
   CSV: docs/outputs/astra4_intraday.csv
   DT_COL: Datetime
   BASIS: prev_close
-  # サイト公開先
   SITE_REPO: SakuraIndex/Sakura-Index-Site
   SITE_BRANCH: main
   PUBLISH_DIR: docs/charts
@@ -93,12 +91,13 @@ jobs:
         run: |
           set -euo pipefail
           echo "=== Generate ${INDEX_KEY} intraday snapshot ==="
+
           python scripts/make_intraday_post.py \
-            --index-key  "${INDEX_KEY}" \
-            --csv        "${CSV}" \
-            --out-json   "${OUT_JSON}" \
-            --out-text   "${OUT_TEXT}" \
-            --snapshot-png "${SNAPSHOT_PNG}" \
+            --index-key     "${INDEX_KEY}" \
+            --csv           "${CSV}" \
+            --out-json      "${OUT_JSON}" \
+            --out-text      "${OUT_TEXT}" \
+            --snapshot-png  "${SNAPSHOT_PNG}" \
             --session-start "${SESSION_START}" \
             --session-end   "${SESSION_END}" \
             --day-anchor    "${DAY_ANCHOR}" \
@@ -107,27 +106,30 @@ jobs:
             --dt-col        "${DT_COL}" \
             --value-type    "${VALUE_TYPE_IN}"
 
-          # PNG が何らかの理由で出力されなかった場合のフォールバック描画
+          # フォールバック：PNG が無い場合は簡易プロットを生成
           if [ ! -f "${SNAPSHOT_PNG}" ]; then
             echo "[fallback] ${SNAPSHOT_PNG} を生成します"
             python - <<'PY'
-import pandas as pd, matplotlib.pyplot as plt, pathlib, json
-csv_path = pathlib.Path("docs/outputs/astra4_intraday.csv")
-png_path = pathlib.Path("docs/outputs/astra4_intraday.png")
-df = pd.read_csv(csv_path)
-num_cols = [c for c in df.columns if c != "Datetime"]
-if len(num_cols) == 0:
-    y = [0]; x = [0]
-else:
-    y = df[num_cols].mean(axis=1).tolist()
-    x = range(len(y))
-plt.figure(figsize=(8,3), dpi=160)
-plt.plot(list(x), list(y))
-plt.title("ASTRA4 Intraday (fallback)")
-plt.tight_layout()
-png_path.parent.mkdir(parents=True, exist_ok=True)
-plt.savefig(png_path)
-PY
+            import pandas as pd, matplotlib.pyplot as plt, pathlib
+
+            csv_path = pathlib.Path("docs/outputs/astra4_intraday.csv")
+            png_path = pathlib.Path("docs/outputs/astra4_intraday.png")
+
+            df = pd.read_csv(csv_path)
+            num_cols = [c for c in df.columns if c != "Datetime"]
+            if len(num_cols) == 0:
+                y = [0]; x = [0]
+            else:
+                y = df[num_cols].mean(axis=1).tolist()
+                x = range(len(y))
+
+            plt.figure(figsize=(8,3), dpi=160)
+            plt.plot(list(x), list(y))
+            plt.title("ASTRA4 Intraday (fallback)")
+            plt.tight_layout()
+            png_path.parent.mkdir(parents=True, exist_ok=True)
+            plt.savefig(png_path)
+            PY
           fi
 
       - name: Upload artifacts (for debug)
@@ -140,7 +142,6 @@ PY
             docs/outputs/astra4_post_intraday.txt
             docs/outputs/astra4_intraday.png
 
-      # ====== ここからサイト公開 ======
       - name: Checkout site repo (for publishing)
         uses: actions/checkout@v4
         with:
@@ -155,11 +156,11 @@ PY
         run: |
           set -e
           mkdir -p site/${PUBLISH_DIR}
-          # 1d チャート（最新の intraday を 1d へ更新する運用）
+          # 1d チャート（intraday を 1d として更新）
           cp -f docs/outputs/astra4_intraday.png site/${PUBLISH_DIR}/astra4_1d.png || true
-          # stats と投稿テキスト（stats はサイトが参照）
-          cp -f docs/outputs/astra4_stats.json         site/${PUBLISH_DIR}/astra4_stats.json || true
-          cp -f docs/outputs/astra4_post_intraday.txt  site/${PUBLISH_DIR}/astra4_post_intraday.txt || true
+          # stats / テキスト
+          cp -f docs/outputs/astra4_stats.json        site/${PUBLISH_DIR}/astra4_stats.json || true
+          cp -f docs/outputs/astra4_post_intraday.txt site/${PUBLISH_DIR}/astra4_post_intraday.txt || true
 
       - name: Commit & push site charts
         shell: bash
