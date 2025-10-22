@@ -75,12 +75,13 @@ jobs:
           set -euo pipefail
           echo "=== Generate ${INDEX_KEY} intraday snapshot ==="
 
-          # JSON/TEXT を生成（PNG はオプショナル）
+          # JSON/TEXT を生成（PNG も指定。PNG が作られなくても後段でフォールバック）
           python scripts/make_intraday_post.py \
             --index-key "${INDEX_KEY}" \
             --csv "${CSV}" \
             --out-text "${OUT_TEXT}" \
             --out-json "${OUT_JSON}" \
+            --snapshot-png "${SNAPSHOT_PNG}" \
             --session-start "${SESSION_START}" \
             --session-end "${SESSION_END}" \
             --day-anchor "${DAY_ANCHOR}" \
