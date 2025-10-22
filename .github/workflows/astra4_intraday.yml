@@ -105,7 +105,7 @@ jobs:
             --dt-col "${DT_COL}" \
             --value-type "${VALUE_TYPE_IN}"
 
-          # フォールバック（PNGが無い時だけ生成）
+          # --- fallback PNG generation ---
           if [ ! -f "${SNAPSHOT_PNG}" ]; then
             echo "[fallback] create simple PNG → ${SNAPSHOT_PNG}"
 python - <<'PY'
@@ -120,7 +120,8 @@ df = pd.read_csv(csv_path)
 num_cols = [c for c in df.columns if c != "Datetime"]
 
 if len(num_cols) == 0:
-    y = [0]; x = [0]
+    y = [0]
+    x = [0]
 else:
     y = df[num_cols].mean(axis=1).tolist()
     x = list(range(len(y)))
