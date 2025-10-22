@@ -1,4 +1,4 @@
-name: ASTRA4 • intraday snapshot (JST 09:00–15:30)
+name: <INDEX> • intraday + publish (JST 09:00–15:30)
 
 on:
   workflow_dispatch:
@@ -20,7 +20,7 @@ on:
         required: true
         default: "prev_close"
       value_type:
-        description: "Value type: ratio | percent (override default)"
+        description: "Value type: ratio | percent"
         required: false
         default: ""
   schedule:
@@ -30,21 +30,30 @@ on:
 permissions:
   contents: write
 
+env:
+  # ← ここを指数ごとに置き換え
+  INDEX_KEY: **ASTRA4**          # 例
+  LABEL:     **ASTRA4**          # 例
+  CSV:       **docs/outputs/astra4_intraday.csv**  # 例
+  DT_COL:    **"Datetime"**     # 例（コロン含む場合は必ずクォート）
+  SITE_REPO: SakuraIndex/Sakura-Index-Site
+  SITE_BRANCH: main
+  PUBLISH_DIR: docs/charts/${{ env.INDEX_KEY }}
+
 concurrency:
-  group: astra4-intraday-${{ github.ref }}
+  group: intraday-${{ github.ref }}-${{ env.INDEX_KEY }}
   cancel-in-progress: false
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 12
 
     steps:
-      - name: Checkout repository
+      - name: Checkout (this repo)
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          persist-credentials: true
 
       - name: Setup Python 3.11
         uses: actions/setup-python@v5
@@ -56,97 +65,94 @@ jobs:
           python -m pip install --upgrade pip
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
 
-      - name: Verify scripts & inputs
+      - name: Verify inputs
         run: |
-          set -e
           test -f scripts/make_intraday_post.py || (echo "Missing scripts/make_intraday_post.py" && exit 1)
-          test -f docs/outputs/astra4_intraday.csv || (echo "Missing docs/outputs/astra4_intraday.csv" && exit 1)
-          echo "All inputs verified."
+          test -f "${{ env.CSV }}" || (echo "Missing CSV: ${{ env.CSV }}" && exit 1)
 
-      - name: Generate intraday snapshot and post
+      - name: Generate intraday snapshot & post
         env:
-          INDEX_KEY: ASTRA4
-          CSV: docs/outputs/astra4_intraday.csv
-          OUT_JSON: docs/outputs/astra4_stats.json
-          OUT_TEXT: docs/outputs/astra4_post_intraday.txt
-          SNAPSHOT_PNG: docs/outputs/astra4_intraday.png
+          OUT_JSON: docs/outputs/${{ env.INDEX_KEY,, }}_stats.json
+          OUT_TEXT: docs/outputs/${{ env.INDEX_KEY,, }}_post_intraday.txt
+          SNAPSHOT_PNG: docs/outputs/${{ env.INDEX_KEY,, }}_intraday.png
           SESSION_START: ${{ inputs.session_start || '09:00' }}
-          SESSION_END: ${{ inputs.session_end || '15:30' }}
-          DAY_ANCHOR: ${{ inputs.day_anchor || '09:00' }}
-          BASIS: ${{ inputs.basis || 'prev_close' }}
-          VALUE_TYPE: ${{ inputs.value_type || 'percent' }}
-          DT_COL: "Unnamed: 0"         # pandas の既定列名（コロン含むためクォート必須）
-          LABEL: ASTRA4
+          SESSION_END:   ${{ inputs.session_end   || '15:30' }}
+          DAY_ANCHOR:    ${{ inputs.day_anchor    || '09:00' }}
+          BASIS:         ${{ inputs.basis         || 'prev_close' }}
+          VALUE_TYPE_IN: ${{ inputs.value_type    || '' }}
         run: |
           set -euo pipefail
-          echo "=== Generate ASTRA4 intraday snapshot ==="
+          if [ -z "${VALUE_TYPE_IN}" ]; then
+            VALUE_TYPE=percent
+          else
+            VALUE_TYPE="${VALUE_TYPE_IN}"
+          fi
+          echo "VALUE_TYPE=${VALUE_TYPE} (default=percent)"
           python scripts/make_intraday_post.py \
-            --index-key "${INDEX_KEY}" \
-            --csv "${CSV}" \
-            --out-json "${OUT_JSON}" \
-            --out-text "${OUT_TEXT}" \
+            --index-key   "${INDEX_KEY}" \
+            --label       "${LABEL}" \
+            --csv         "${CSV}" \
+            --out-json    "${OUT_JSON}" \
+            --out-text    "${OUT_TEXT}" \
             --snapshot-png "${SNAPSHOT_PNG}" \
             --session-start "${SESSION_START}" \
-            --session-end "${SESSION_END}" \
-            --day-anchor "${DAY_ANCHOR}" \
-            --basis "${BASIS}" \
-            --value-type "${VALUE_TYPE}" \
-            --dt-col "${DT_COL}" \
-            --label "${LABEL}"
+            --session-end   "${SESSION_END}" \
+            --day-anchor    "${DAY_ANCHOR}" \
+            --basis         "${BASIS}" \
+            --value-type    "${VALUE_TYPE}" \
+            --dt-col        "${DT_COL}"
 
-      - name: Upload artifacts (for debug)
-        if: always()
+      # （任意）このリポの docs/outputs にも残したい場合は次を有効化
+      # - name: Commit outputs back to this repo
+      #   run: |
+      #     set -e
+      #     git config user.name  "github-actions[bot]"
+      #     git config user.email "github-actions[bot]@users.noreply.github.com"
+      #     git add docs/outputs/${{ env.INDEX_KEY,, }}_*.*
+      #     if ! git diff --cached --quiet; then
+      #       git commit -m "chore(intraday): update ${{ env.INDEX_KEY }} outputs"
+      #       git push
+      #     else
+      #       echo "No output changes."
+
+      - name: Upload artifacts (debug)
         uses: actions/upload-artifact@v4
         with:
-          name: astra4_intraday_artifacts
+          name: ${{ env.INDEX_KEY,, }}_intraday_artifacts
           path: |
-            docs/outputs/astra4_intraday.png
-            docs/outputs/astra4_post_intraday.txt
-            docs/outputs/astra4_stats.json
-          if-no-files-found: ignore
+            docs/outputs/${{ env.INDEX_KEY,, }}_intraday.png
+            docs/outputs/${{ env.INDEX_KEY,, }}_post_intraday.txt
+            docs/outputs/${{ env.INDEX_KEY,, }}_stats.json
+          if-no-files-found: error
           retention-days: 3
 
-      - name: Commit outputs if changed
-        run: |
-          set -e
-          git config --global user.name  "github-actions[bot]"
-          git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          git add docs/outputs/astra4_intraday.png \
-                  docs/outputs/astra4_post_intraday.txt \
-                  docs/outputs/astra4_stats.json || true
-          if ! git diff --cached --quiet; then
-            git commit -m "chore(intraday): update ASTRA4 (snapshot & post)"
-            git push
-          else
-            echo "No output changes detected."
-          fi
-
-      - name: Checkout SakuraIndexSite (for publishing)
+      - name: Checkout site repo (for publishing)
         uses: actions/checkout@v4
         with:
-          repository: Sakuralndex/SakuraIndexSite   # ← 実際の org/repo に合わせる
-          path: SakuraIndexSite
+          repository: ${{ env.SITE_REPO }}
+          ref: ${{ env.SITE_BRANCH }}
+          path: site
           token: ${{ secrets.SITE_PAT }}
           fetch-depth: 0
 
-      - name: Publish ASTRA4 snapshot to site
+      - name: Copy snapshot files into site tree
         run: |
-          set -euo pipefail
-          python SakuraIndexSite/scripts/publish_to_site.py \
-            --index-key ASTRA4 \
-            --from docs/outputs \
-            --site-root SakuraIndexSite \
-            --verbose
+          set -e
+          mkdir -p "site/${PUBLISH_DIR}"
+          cp -f docs/outputs/${INDEX_KEY,,}_intraday.png      "site/${PUBLISH_DIR}/intraday.png"
+          cp -f docs/outputs/${INDEX_KEY,,}_post_intraday.txt "site/${PUBLISH_DIR}/post_intraday.txt"
+          cp -f docs/outputs/${INDEX_KEY,,}_stats.json        "site/${PUBLISH_DIR}/stats.json"
 
-      - name: Commit & push site charts
+      - name: Commit & push to site
         run: |
-          set -euo pipefail
-          git -C SakuraIndexSite config user.name  "github-actions[bot]"
-          git -C SakuraIndexSite config user.email "github-actions[bot]@users.noreply.github.com"
-          git -C SakuraIndexSite add docs/charts || true
-          if git -C SakuraIndexSite diff --cached --quiet; then
-            echo "No site changes."
+          set -e
+          cd site
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add "${PUBLISH_DIR}/"
+          if ! git diff --cached --quiet; then
+            git commit -m "publish(${INDEX_KEY}): intraday snapshot"
+            git push origin "${SITE_BRANCH}"
           else
-            git -C SakuraIndexSite commit -m "publish: ASTRA4 intraday snapshot"
-            git -C SakuraIndexSite push origin main
+            echo "No changes to publish."
           fi
