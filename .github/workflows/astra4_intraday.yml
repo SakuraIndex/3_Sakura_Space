@@ -31,17 +31,16 @@ on:
 permissions:
   contents: write
 
-# ここは“固定値だけ”。式 (${{ ... }}) を入れないこと！
 env:
   INDEX_KEY: ASTRA4
   LABEL: ASTRA4
   CSV: docs/outputs/astra4_intraday.csv
-  DT_COL: "Datetime"                 # 例: CSVに合わせて "Unnamed: 0" に変更可
+  DT_COL: "Datetime"
   OUT_JSON: docs/outputs/astra4_stats.json
   OUT_TEXT: docs/outputs/astra4_post_intraday.txt
   SNAPSHOT_PNG: docs/outputs/astra4_intraday.png
 
-  # 公開先サイト（固定文字列のみ）
+  # サイト設定
   SITE_REPO: SakuraIndex/Sakura-Index-Site
   SITE_BRANCH: main
 
@@ -50,14 +49,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 12
 
-    # concurrency はジョブ配下に。ここなら env を参照できる
     concurrency:
-      group: intraday-${{ github.ref }}-${{ env.INDEX_KEY }}
+      group: intraday-${{ github.ref }}-ASTRA4
       cancel-in-progress: false
-
-    # PUBLISH_DIR もジョブの env で（env を参照 OK）
-    env:
-      PUBLISH_DIR: docs/charts/${{ env.INDEX_KEY }}
 
     steps:
       - name: Checkout (this repo)
@@ -129,6 +123,7 @@ jobs:
       - name: Copy snapshot files into site tree
         run: |
           set -e
+          PUBLISH_DIR="docs/charts/${INDEX_KEY}"
           mkdir -p "site/${PUBLISH_DIR}"
           cp -f "${SNAPSHOT_PNG}" "site/${PUBLISH_DIR}/intraday.png"
           cp -f "${OUT_TEXT}"     "site/${PUBLISH_DIR}/post_intraday.txt"
@@ -141,7 +136,7 @@ jobs:
           set -e
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add "${PUBLISH_DIR}/intraday.png" "${PUBLISH_DIR}/post_intraday.txt" "${PUBLISH_DIR}/stats.json" || true
+          git add docs/charts/${INDEX_KEY}/intraday.png docs/charts/${INDEX_KEY}/post_intraday.txt docs/charts/${INDEX_KEY}/stats.json || true
           if ! git diff --cached --quiet; then
             git commit -m "chore(charts): update ${INDEX_KEY} intraday"
             git push origin "${SITE_BRANCH}"
