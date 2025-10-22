@@ -1,4 +1,4 @@
-name: ASTRA4 • intraday + publish (JST 09:00–15:30)
+name: "ASTRA4 • intraday + publish (JST 09:00–15:30)"
 
 on:
   workflow_dispatch:
@@ -16,27 +16,33 @@ on:
         required: true
         default: "09:00"
       value_type:
-        description: "Value type"
+        description: "percent or ratio"
         required: true
         default: "percent"
-        type: choice
-        options: [percent, ratio]
 
 permissions:
   contents: write
 
 env:
-  # === 指数ごとの固定 ===
   INDEX_KEY: ASTRA4
   LABEL: ASTRA4
   CSV: docs/outputs/astra4_intraday.csv
   DT_COL: Datetime
   BASIS: prev_close
 
-  # === 公開サイト設定（必要なら調整）===
-  SITE_REPO: SakuraIndex/Sakura-Index-Site
+  # 出力ファイル（このリポ内）
+  OUT_JSON: docs/charts/astra4_stats.json
+  OUT_TEXT: docs/charts/astra4_post_intraday.txt
+  SNAPSHOT_PNG: docs/charts/astra4_1d.png
+
+  # 公開サイト（外部）設定
+  SITE_REPO: SakuraIndex/SakuraIndexSite
   SITE_BRANCH: main
-  PUBLISH_DIR: docs/charts/${{ env.INDEX_KEY }}
+  PUBLISH_DIR: docs/charts/ASTRA4
+
+concurrency:
+  group: "intraday-astra4-${{ github.ref }}"
+  cancel-in-progress: false
 
 jobs:
   build:
@@ -46,6 +52,8 @@ jobs:
     steps:
       - name: Checkout (this repo)
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Setup Python 3.11
         uses: actions/setup-python@v5
@@ -57,8 +65,10 @@ jobs:
         run: |
           set -e
           if [ -f requirements.txt ]; then
+            python -m pip install -U pip
             python -m pip install -r requirements.txt
           else
+            python -m pip install -U pip
             python -m pip install pandas matplotlib
           fi
 
@@ -66,8 +76,14 @@ jobs:
         shell: bash
         run: |
           set -e
-          test -f "${CSV}" || { echo "Missing CSV: ${CSV}"; exit 1; }
-          test -f scripts/make_intraday_post.py || { echo "Missing script: scripts/make_intraday_post.py"; exit 1; }
+          test -f "${CSV}" || (echo "Missing CSV: ${CSV}" && exit 1)
+          test -f scripts/make_intraday_post.py || (echo "Missing script: scripts/make_intraday_post.py" && exit 1)
+
+      - name: Decide publish variant (AM / PM)
+        id: ampm
+        shell: bash
+        run: |
+          TZ=Asia/Tokyo date +%H | awk '{ if($1 < 12) print "variant=am"; else print "variant=pm" }' >> "$GITHUB_OUTPUT"
 
       - name: Generate intraday snapshot and post (with fallback)
         shell: bash
@@ -76,9 +92,9 @@ jobs:
           SESSION_END:   ${{ inputs.session_end }}
           DAY_ANCHOR:    ${{ inputs.day_anchor }}
           VALUE_TYPE:    ${{ inputs.value_type }}
-          OUT_JSON:      docs/charts/astra4_stats.json
-          OUT_TEXT:      docs/charts/astra4_post_intraday.txt
-          SNAPSHOT_PNG:  docs/charts/astra4_1d.png
+          OUT_JSON:      ${{ env.OUT_JSON }}
+          OUT_TEXT:      ${{ env.OUT_TEXT }}
+          SNAPSHOT_PNG:  ${{ env.SNAPSHOT_PNG }}
         run: |
           set -euo pipefail
           echo "=== Generate ${INDEX_KEY} intraday snapshot ==="
@@ -96,15 +112,10 @@ jobs:
             --dt-col "${DT_COL}" \
             --value-type "${VALUE_TYPE}"
 
-          # --- Fallback: PNGが無い場合は簡易チャートを生成 ---
+          # --- Fallback: スナップショットPNGが出ていない場合は簡易PNGを生成 ---
           if [ ! -f "${SNAPSHOT_PNG}" ]; then
             echo "[fallback] create simple PNG -> ${SNAPSHOT_PNG}"
-            python -c "import pandas as pd, matplotlib.pyplot as plt, pathlib as P; \
-csv=P.Path('docs/outputs/astra4_intraday.csv'); png=P.Path('docs/charts/astra4_1d.png'); \
-df=pd.read_csv(csv); cols=[c for c in df.columns if c!='Datetime']; \
-y=[0] if not cols else df[cols].mean(axis=1).tolist(); x=list(range(len(y))); \
-plt.figure(figsize=(8,3), dpi=160); plt.plot(x,y); plt.title('ASTRA4 Intraday (fallback)'); plt.tight_layout(); \
-png.parent.mkdir(parents=True, exist_ok=True); plt.savefig(png)"
+            python -c "import pandas as pd, matplotlib.pyplot as plt, pathlib as P; csv=P.Path('docs/outputs/astra4_intraday.csv'); png=P.Path('docs/charts/astra4_1d.png'); df=pd.read_csv(csv); cols=[c for c in df.columns if c!='Datetime']; y=[0] if not cols else df[cols].mean(axis=1).tolist(); x=list(range(len(y))); plt.figure(figsize=(8,3), dpi=160); plt.plot(x,y); plt.title('ASTRA4 Intraday (fallback)'); plt.tight_layout(); png.parent.mkdir(parents=True, exist_ok=True); plt.savefig(png)"
           fi
 
       - name: Upload artifacts (for debug)
@@ -113,38 +124,47 @@ png.parent.mkdir(parents=True, exist_ok=True); plt.savefig(png)"
         with:
           name: astra4_intraday_artifacts
           path: |
-            docs/charts/astra4_post_intraday.txt
-            docs/charts/astra4_1d.png
-            docs/charts/astra4_stats.json
+            ${{ env.OUT_TEXT }}
+            ${{ env.SNAPSHOT_PNG }}
+            ${{ env.OUT_JSON }}
 
       - name: Checkout site repo (for publishing)
         uses: actions/checkout@v4
         with:
           repository: ${{ env.SITE_REPO }}
           ref: ${{ env.SITE_BRANCH }}
-          token: ${{ secrets.GITHUB_TOKEN }}
-          path: site
+          token: ${{ secrets.SITE_TOKEN }}
+          fetch-depth: 1
 
       - name: Copy snapshot files into site tree
         shell: bash
         run: |
           set -e
-          mkdir -p "site/${PUBLISH_DIR}"
-          cp -f docs/charts/astra4_1d.png             "site/${PUBLISH_DIR}/"
-          cp -f docs/charts/astra4_stats.json         "site/${PUBLISH_DIR}/"
-          cp -f docs/charts/astra4_post_intraday.txt  "site/${PUBLISH_DIR}/" || true
+          mkdir -p "${PUBLISH_DIR}"
+          cp -f "../${OUT_JSON}"      "${PUBLISH_DIR}/astra4_stats.json"
+          cp -f "../${OUT_TEXT}"      "${PUBLISH_DIR}/astra4_post_intraday.txt"
+          cp -f "../${SNAPSHOT_PNG}"  "${PUBLISH_DIR}/astra4_1d.png"
+          echo "Site tree updated: ${PUBLISH_DIR}"
+          ls -l "${PUBLISH_DIR}"
 
       - name: Commit & push site charts
         shell: bash
-        working-directory: site
         run: |
           set -e
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -A
-          if git diff --cached --quiet; then
-            echo "No site changes."
-          else
-            git commit -m "ASTRA4: intraday charts ($(date -u +'%Y-%m-%dT%H:%M:%SZ'))"
+          if ! git diff --quiet; then
+            git add "${PUBLISH_DIR}"
+            git commit -m "ASTRA4 intraday update: $(TZ=Asia/Tokyo date '+%Y-%m-%d %H:%M JST')"
             git push origin "${SITE_BRANCH}"
+          else
+            echo "No changes to commit."
           fi
+
+      - name: Post Setup Python 3.11
+        if: always()
+        run: python --version
+
+      - name: Post Checkout (this repo)
+        if: always()
+        run: echo "Done."
