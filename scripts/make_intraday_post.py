@@ -212,12 +212,12 @@ def main() -> None:
 
     # JSON は ratio（小数）で出力（Front と揃える）
     stats = {
-        "index_key": args.index_key,
+        "index_key": args.index_key,  # 例: "ASTRA4"
         "label": title_label,
         "pct_intraday": float(np.round(last_pct / 100.0, 6)),  # 例: -0.27% → -0.0027
         "basis": args.basis,
         "session": {"start": args.session_start, "end": args.session_end, "anchor": args.day_anchor},
-        "updated_at": f"{pd.Timestamp.now(tz=JST).isoformat()}",
+        "updated_at": pd.Timestamp.now(tz=JST).isoformat(),
     }
     with open(args.out_json, "w", encoding="utf-8") as f:
         json.dump(stats, f, ensure_ascii=False, indent=2)
