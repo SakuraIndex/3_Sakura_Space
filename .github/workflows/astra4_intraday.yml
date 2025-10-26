@@ -30,10 +30,12 @@ env:
   DT_COL: Datetime
   BASIS: prev_close
 
+  # 出力物（このリポ内）。名前は何でもOK（サイトへコピー時に正規名へリネーム）
   OUT_JSON: docs/charts/astra4_stats.json
   OUT_TEXT: docs/charts/astra4_post_intraday.txt
   SNAPSHOT_PNG: docs/charts/astra4_1d.png
 
+  # 公開サイト
   SITE_REPO: SakuraIndex/Sakura-Index-Site
   SITE_BRANCH: main
   PUBLISH_DIR: docs/charts/ASTRA4
@@ -127,15 +129,16 @@ jobs:
           path: site
           fetch-depth: 0
 
-      - name: Copy snapshot files into site tree
+      - name: Copy snapshot files into site tree (use site-expected names)
         shell: bash
         run: |
           set -euo pipefail
           dst="site/${PUBLISH_DIR}"
           mkdir -p "${dst}"
-          cp -f "${OUT_JSON}"      "${dst}/astra4_stats.json"
-          cp -f "${OUT_TEXT}"      "${dst}/astra4_post_intraday.txt"
-          cp -f "${SNAPSHOT_PNG}"  "${dst}/astra4_1d.png"
+          # サイト側は stats.json / intraday.png / post_intraday.txt を読む
+          cp -f "${OUT_JSON}"     "${dst}/stats.json"
+          cp -f "${OUT_TEXT}"     "${dst}/post_intraday.txt"
+          cp -f "${SNAPSHOT_PNG}" "${dst}/intraday.png"
           echo "📁 Copied to ${dst}:"
           ls -l "${dst}"
 
