@@ -30,12 +30,12 @@ env:
   DT_COL: Datetime
   BASIS: prev_close
 
-  # 出力物（このリポ内）。名前は何でもOK（サイトへコピー時に正規名へリネーム）
+  # このリポ内の一時出力（後でサイトへコピー）
   OUT_JSON: docs/charts/astra4_stats.json
   OUT_TEXT: docs/charts/astra4_post_intraday.txt
   SNAPSHOT_PNG: docs/charts/astra4_1d.png
 
-  # 公開サイト
+  # 公開サイト発行先
   SITE_REPO: SakuraIndex/Sakura-Index-Site
   SITE_BRANCH: main
   PUBLISH_DIR: docs/charts/ASTRA4
@@ -129,23 +129,15 @@ jobs:
           path: site
           fetch-depth: 0
 
-      - name: Copy snapshot files into site tree (standard + legacy names)
+      - name: Copy snapshot files into site tree (site filenames)
         shell: bash
         run: |
           set -euo pipefail
           dst="site/${PUBLISH_DIR}"
           mkdir -p "${dst}"
-
-          # 標準名（フロントはまずこちらを参照）
           cp -f "${OUT_JSON}"     "${dst}/stats.json"
           cp -f "${OUT_TEXT}"     "${dst}/post_intraday.txt"
           cp -f "${SNAPSHOT_PNG}" "${dst}/intraday.png"
-
-          # 後方互換（従来のファイル名も併置）
-          cp -f "${OUT_JSON}"     "${dst}/astra4_stats.json"
-          cp -f "${OUT_TEXT}"     "${dst}/astra4_post_intraday.txt"
-          cp -f "${SNAPSHOT_PNG}" "${dst}/astra4_1d.png"
-
           echo "📁 Copied to ${dst}:"
           ls -l "${dst}"
 
@@ -160,7 +152,7 @@ jobs:
           if git diff --cached --quiet; then
             echo "No changes to commit."
           else
-            git commit -m "Update ASTRA4 intraday charts ($(TZ=Asia/Tokyo date '+%Y-%m-%d %H:%M JST'))"
+            git commit -m "Update ASTRA4 intraday charts ($(date '+%Y-%m-%d %H:%M JST'))"
             git push origin "${SITE_BRANCH}"
           fi
 
