@@ -16,9 +16,9 @@ on:
         required: true
         default: "09:00"
       value_type:
-        description: "percent or ratio"
+        description: "auto | percent | ratio"
         required: true
-        default: "percent"
+        default: "auto"
 
 permissions:
   contents: write
@@ -34,12 +34,9 @@ env:
   OUT_TEXT: docs/charts/astra4_post_intraday.txt
   SNAPSHOT_PNG: docs/charts/astra4_1d.png
 
-  # 公開サイト用リポジトリ（ハイフン入りが正しい）
   SITE_REPO: SakuraIndex/Sakura-Index-Site
   SITE_BRANCH: main
   PUBLISH_DIR: docs/charts/ASTRA4
-
-  # 優先順位：SITE_PUBLISH_TOKEN → SITE_PAT → GITHUB_TOKEN
   PUBLISH_TOKEN: ${{ secrets.SITE_PUBLISH_TOKEN || secrets.SITE_PAT || secrets.GITHUB_TOKEN }}
 
 concurrency:
@@ -81,30 +78,19 @@ jobs:
           test -f "${CSV}" || (echo "❌ Missing CSV: ${CSV}" && exit 1)
           test -f scripts/make_intraday_post.py || (echo "❌ Missing script: scripts/make_intraday_post.py" && exit 1)
 
-      - name: Decide publish variant (AM / PM)
-        id: ampm
-        shell: bash
-        run: |
-          TZ=Asia/Tokyo date +%H | awk '{ if($1 < 12) print "variant=am"; else print "variant=pm" }' >> "$GITHUB_OUTPUT"
-
       - name: Prepare output directories
         shell: bash
         run: |
           set -e
-          mkdir -p "$(dirname "${OUT_JSON}")"
-          mkdir -p "$(dirname "${OUT_TEXT}")"
-          mkdir -p "$(dirname "${SNAPSHOT_PNG}")"
+          mkdir -p "$(dirname "${OUT_JSON}")" "$(dirname "${OUT_TEXT}")" "$(dirname "${SNAPSHOT_PNG}")"
 
-      - name: Generate intraday snapshot and post (with fallback)
+      - name: Generate intraday snapshot and post
         shell: bash
         env:
           SESSION_START: ${{ inputs.session_start }}
           SESSION_END:   ${{ inputs.session_end }}
           DAY_ANCHOR:    ${{ inputs.day_anchor }}
           VALUE_TYPE:    ${{ inputs.value_type }}
-          OUT_JSON:      ${{ env.OUT_JSON }}
-          OUT_TEXT:      ${{ env.OUT_TEXT }}
-          SNAPSHOT_PNG:  ${{ env.SNAPSHOT_PNG }}
         run: |
           set -euo pipefail
           echo "=== Generate ${INDEX_KEY} intraday snapshot ==="
@@ -122,12 +108,6 @@ jobs:
             --dt-col "${DT_COL}" \
             --value-type "${VALUE_TYPE}"
 
-          # --- Fallback: PNGが無ければ簡易PNGを生成 ---
-          if [ ! -f "${SNAPSHOT_PNG}" ]; then
-            echo "[fallback] create simple PNG → ${SNAPSHOT_PNG}"
-            python -c "import pandas as pd, matplotlib.pyplot as plt, pathlib as P; csv=P.Path('${CSV}'); png=P.Path('${SNAPSHOT_PNG}'); png.parent.mkdir(parents=True, exist_ok=True); df=pd.read_csv(csv); cols=[c for c in df.columns if c!='Datetime']; y=[0] if not cols else df[cols].mean(axis=1).tolist(); x=list(range(len(y))); plt.figure(figsize=(8,3), dpi=160); plt.plot(x,y); plt.title('ASTRA4 Intraday (fallback)'); plt.tight_layout(); plt.savefig(png)"
-          fi
-
       - name: Upload artifacts (for debug)
         if: always()
         uses: actions/upload-artifact@v4
@@ -138,7 +118,6 @@ jobs:
             ${{ env.SNAPSHOT_PNG }}
             ${{ env.OUT_JSON }}
 
-      # === 公開サイトリポをチェックアウト ===
       - name: Checkout site repo (for publishing)
         uses: actions/checkout@v4
         with:
@@ -148,20 +127,18 @@ jobs:
           path: site
           fetch-depth: 0
 
-      # === 出力物をコピー ===
       - name: Copy snapshot files into site tree
         shell: bash
         run: |
           set -euo pipefail
           dst="site/${PUBLISH_DIR}"
           mkdir -p "${dst}"
-          cp -f "${OUT_JSON}" "${dst}/astra4_stats.json" || true
-          cp -f "${OUT_TEXT}" "${dst}/astra4_post_intraday.txt" || true
-          cp -f "${SNAPSHOT_PNG}" "${dst}/astra4_1d.png" || true
+          cp -f "${OUT_JSON}"      "${dst}/astra4_stats.json"
+          cp -f "${OUT_TEXT}"      "${dst}/astra4_post_intraday.txt"
+          cp -f "${SNAPSHOT_PNG}"  "${dst}/astra4_1d.png"
           echo "📁 Copied to ${dst}:"
           ls -l "${dst}"
 
-      # === コミット & プッシュ ===
       - name: Commit & push site charts
         working-directory: site
         shell: bash
