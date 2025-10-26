@@ -81,9 +81,21 @@ def find_value_column(df: pd.DataFrame, index_key: str) -> str:
         return numeric_cols[0]
     raise ValueError(f"CSV に対象列 '{index_key}' がありません。列={cols}")
 
-def coerce_series_as_percent(series: pd.Series, value_type: str) -> pd.Series:
+def _detect_unit_is_ratio(s: pd.Series) -> bool:
+    """95%点の絶対値が 0.5 未満なら ratio（= 0.5% 未満が多い）とみなす"""
+    arr = pd.to_numeric(s, errors="coerce").to_numpy()
+    arr = arr[~np.isnan(arr)]
+    if arr.size == 0:
+        return False
+    return float(np.quantile(np.abs(arr), 0.95)) < 0.5
+
+def to_percent_series(series: pd.Series, value_type: str) -> pd.Series:
+    """value_type: auto | ratio | percent"""
     s = pd.to_numeric(series, errors="coerce")
-    if value_type == "ratio":
+    vt = value_type.lower()
+    if vt == "auto":
+        vt = "ratio" if _detect_unit_is_ratio(s) else "percent"
+    if vt == "ratio":
         s = s * 100.0
     return s
 
@@ -105,7 +117,7 @@ class Args:
     basis: str
     label: Optional[str]
     dt_col: Optional[str]
-    value_type: str
+    value_type: str  # auto | percent | ratio
 
 def parse_args() -> Args:
     p = argparse.ArgumentParser()
@@ -120,7 +132,7 @@ def parse_args() -> Args:
     p.add_argument("--basis", required=True)
     p.add_argument("--label", default=None)
     p.add_argument("--dt-col", default=None)
-    p.add_argument("--value-type", choices=["ratio","percent"], default="percent")
+    p.add_argument("--value-type", choices=["auto","ratio","percent"], default="auto")
     a = p.parse_args()
     return Args(
         index_key=a.index_key, csv=a.csv, out_json=a.out_json, out_text=a.out_text,
@@ -142,17 +154,24 @@ def summarize_and_plot(
     if s.empty:
         raise ValueError("セッション内データがありません。")
 
+    last_pct = float(s.iloc[-1])
+
+    # 線色：プラス→青 / マイナス→赤
+    line_color = "#00E5FF" if last_pct >= 0 else "#FF4D4D"
+
     fig, ax = plt.subplots(figsize=(12, 6), dpi=160)
     fig.patch.set_facecolor("#000000")
     ax.set_facecolor("#000000")
     for sp in ax.spines.values():
         sp.set_color("#444444")
 
-    ax.plot(s.index, s.values, linewidth=2.0, color="#00E5FF", label=title_label)
+    ax.plot(s.index, s.values, linewidth=2.0, color=line_color, label=title_label)
     ax.legend(facecolor="#111111", edgecolor="#444444", labelcolor="#DDDDDD")
 
-    ax.set_title(f"{title_label} Intraday Snapshot ({pd.Timestamp.now(tz=JST):%Y/%m/%d %H:%M})",
-                 color="#DDDDDD")
+    ax.set_title(
+        f"{title_label} Intraday Snapshot ({pd.Timestamp.now(tz=JST):%Y/%m/%d %H:%M})  {last_pct:+.2f}%",
+        color="#DDDDDD"
+    )
     ax.set_xlabel("Time", color="#BBBBBB")
     ax.set_ylabel("Change vs Prev Close (%)", color="#BBBBBB")
     ax.tick_params(colors="#BBBBBB")
@@ -161,7 +180,7 @@ def summarize_and_plot(
     fig.savefig(snapshot_png, facecolor=fig.get_facecolor(), edgecolor="none")
     plt.close(fig)
 
-    return float(s.iloc[-1]), s.index[-1]
+    return last_pct, s.index[-1]
 
 def main() -> None:
     args = parse_args()
@@ -170,7 +189,8 @@ def main() -> None:
     df = to_jst_index(raw, args.dt_col)
 
     value_col = find_value_column(df, args.index_key)
-    df[value_col] = coerce_series_as_percent(df[value_col], args.value_type)
+    # ％系列に統一（auto 判定対応）
+    df[value_col] = to_percent_series(df[value_col], args.value_type)
 
     df_sess = filter_session(df, args.session_start, args.session_end)
     if df_sess.empty:
@@ -181,19 +201,20 @@ def main() -> None:
         df_sess, value_col, title_label, args.basis, args.snapshot_png
     )
 
-    sign = "+" if last_pct >= 0 else ""
+    sign_arrow = "▲" if last_pct >= 0 else "▼"
     lines = [
-        f"▲ {title_label} 日中スナップショット ({last_ts.tz_convert(JST):%Y/%m/%d %H:%M})",
-        f"{sign}{last_pct:.2f}% (基準: {args.basis})",
+        f"{sign_arrow} {title_label} 日中スナップショット ({last_ts.tz_convert(JST):%Y/%m/%d %H:%M})",
+        f"{last_pct:+.2f}% (基準: {args.basis})",
         f"#{title_label} #日本株",
     ]
     with open(args.out_text, "w", encoding="utf-8") as f:
         f.write("\n".join(lines))
 
+    # JSON は ratio（小数）で出力（Front と揃える）
     stats = {
-        "index_key": title_label,
+        "index_key": args.index_key,
         "label": title_label,
-        "pct_intraday": last_pct,
+        "pct_intraday": float(np.round(last_pct / 100.0, 6)),  # 例: -0.27% → -0.0027
         "basis": args.basis,
         "session": {"start": args.session_start, "end": args.session_end, "anchor": args.day_anchor},
         "updated_at": f"{pd.Timestamp.now(tz=JST).isoformat()}",
