@@ -1,154 +1,96 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
 """
-ASTRA4 charts + stats
-- y軸: level（元データの値）
-- 1d注記: level差(Δ) と パーセンテージポイント(Δ% = Δ*100) を併記
-- ダークテーマ + 上下で線色を自動切替
+ASTRA4 long-term level charts (7d / 1m / 1y)
+- 入力: docs/outputs/astra4_history.csv（date,value）
+- 出力: docs/outputs/astra4_7d.png, _1m.png, _1y.png
+- 「点が少ない」場合は単点プロット＋注記を描画
 """
+
+from __future__ import annotations
+import os
 from pathlib import Path
-import json
-from datetime import datetime, timezone
 import pandas as pd
 import matplotlib.pyplot as plt
+from matplotlib.ticker import MaxNLocator
+from matplotlib.dates import AutoDateLocator, AutoDateFormatter
 
-# ====== const / paths ======
-INDEX_KEY = "astra4"
-OUTDIR = Path("docs/outputs")
-OUTDIR.mkdir(parents=True, exist_ok=True)
+INDEX_KEY = os.environ.get("INDEX_KEY", "astra4")
+OUT_DIR = Path(os.environ.get("OUT_DIR", "docs/outputs"))
+OUT_DIR.mkdir(parents=True, exist_ok=True)
+HIST_CSV = OUT_DIR / f"{INDEX_KEY}_history.csv"
 
-HISTORY_CSV  = OUTDIR / f"{INDEX_KEY}_history.csv"
-INTRADAY_CSV = OUTDIR / f"{INDEX_KEY}_intraday.csv"
-
-# ====== styling (dark) ======
-DARK_BG = "#0e0f13"
-DARK_AX = "#0b0c10"
-FG_TEXT = "#e7ecf1"
-GRID    = "#2a2e3a"
-RED     = "#ff6b6b"
-GREEN   = "#28e07c"
-FLAT    = "#9aa3af"
-
-def _apply(ax, title: str) -> None:
-    fig = ax.figure
-    fig.set_size_inches(12, 7)
-    fig.set_dpi(160)
-    fig.patch.set_facecolor(DARK_BG)
-    ax.set_facecolor(DARK_AX)
+def theme(fig, ax):
+    fig.set_size_inches(16, 8)
+    fig.set_dpi(200)
+    fig.patch.set_facecolor("#111317")
+    ax.set_facecolor("#111317")
     for sp in ax.spines.values():
-        sp.set_color(GRID)
-    ax.grid(color=GRID, alpha=0.35, linewidth=0.8)
-    ax.tick_params(colors=FG_TEXT, labelsize=10)
-    ax.yaxis.get_major_formatter().set_scientific(False)
-    ax.set_title(title, color=FG_TEXT, fontsize=12)
-    ax.set_xlabel("Time", color=FG_TEXT, fontsize=10)
-    ax.set_ylabel("Index (level)", color=FG_TEXT, fontsize=10)
+        sp.set_visible(False)
+    ax.tick_params(axis="both", colors="#ffffff", labelsize=10)
+    ax.yaxis.label.set_color("#ffffff")
+    ax.xaxis.label.set_color("#ffffff")
+    ax.title.set_color("#ffffff")
+    ax.grid(True, which="major", linestyle="-", linewidth=0.6, alpha=0.18, color="#ffffff")
+    ax.grid(True, which="minor", linestyle="-", linewidth=0.10, alpha=0.10, color="#ffffff")
 
-def _trend_color(first: float, last: float) -> str:
-    if pd.isna(first) or pd.isna(last):
-        return FLAT
-    if last > first:
-        return GREEN
-    if last < first:
-        return RED
-    return FLAT
-
-def _save(df: pd.DataFrame, col: str, out_png: Path, title: str) -> None:
-    # 線色は期間純変化で判定
-    s = pd.to_numeric(df[col], errors="coerce").dropna()
-    first = s.iloc[0] if len(s) else float("nan")
-    last  = s.iloc[-1] if len(s) else float("nan")
-    color = _trend_color(first, last)
-
-    fig, ax = plt.subplots()
-    _apply(ax, title)
-    ax.plot(df.index, df[col], color=color, linewidth=1.6)
-    fig.savefig(out_png, bbox_inches="tight", facecolor=fig.get_facecolor())
-    plt.close(fig)
-
-# ====== data helpers ======
-def _pick_index_column(df: pd.DataFrame) -> str:
-    def norm(s: str) -> str:
-        return s.strip().lower().replace("_", "").replace("-", "")
-    candidates = {
-        "astra4", "astra4mean", "astra4index", "spaceindex", "sakura4"
-    }
-    ncols = {c: norm(c) for c in df.columns}
-    for c, nc in ncols.items():
-        if nc in candidates:
-            return c
-    return df.columns[-1]
-
-def _load_df() -> pd.DataFrame:
-    if INTRADAY_CSV.exists():
-        df = pd.read_csv(INTRADAY_CSV, parse_dates=[0], index_col=0)
-    elif HISTORY_CSV.exists():
-        df = pd.read_csv(HISTORY_CSV, parse_dates=[0], index_col=0)
-    else:
-        raise FileNotFoundError("ASTRA4: neither intraday nor history csv found.")
-    for c in list(df.columns):
-        df[c] = pd.to_numeric(df[c], errors="coerce")
-    df = df.dropna(how="all")
+def load_history() -> pd.DataFrame:
+    if not HIST_CSV.exists():
+        print(f"[long] history not found: {HIST_CSV}")
+        return pd.DataFrame()
+    df = pd.read_csv(HIST_CSV)
+    if df.shape[1] < 2:
+        print(f"[long] invalid history shape: {HIST_CSV}")
+        return pd.DataFrame()
+    dcol, vcol = df.columns[:2]
+    df = df.rename(columns={dcol: "date", vcol: "value"})
+    df["date"] = pd.to_datetime(df["date"], errors="coerce")
+    df = df.dropna(subset=["date","value"]).sort_values("date").reset_index(drop=True)
     return df
 
-# ====== charts ======
-def gen_pngs() -> None:
-    df = _load_df()
-    col = _pick_index_column(df)
+def slice_span(df: pd.DataFrame, days: int) -> pd.DataFrame:
+    if df.empty: return df
+    last = df["date"].max()
+    return df[df["date"] >= (last - pd.Timedelta(days=days))].copy()
 
-    tail_1d = df.tail(1000)
-    tail_7d = df.tail(7 * 1000)
+def plot_span(df: pd.DataFrame, title: str, ylabel: str, out_png: Path):
+    fig, ax = plt.subplots()
+    theme(fig, ax)
+    ax.set_title(title, fontsize=26, fontweight="bold", pad=18)
+    ax.set_xlabel("Time", labelpad=10)
+    ax.set_ylabel(ylabel, labelpad=10)
 
-    _save(tail_1d, col, OUTDIR / f"{INDEX_KEY}_1d.png", f"{INDEX_KEY.upper()} (1d level)")
-    _save(tail_7d, col, OUTDIR / f"{INDEX_KEY}_7d.png", f"{INDEX_KEY.upper()} (7d level)")
-    _save(df,      col, OUTDIR / f"{INDEX_KEY}_1m.png", f"{INDEX_KEY.upper()} (1m level)")
-    _save(df,      col, OUTDIR / f"{INDEX_KEY}_1y.png", f"{INDEX_KEY.upper()} (1y level)")
-
-# ====== stats (level + percent points) ======
-def _now_utc_iso() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
-
-def _delta_level_and_pp(s: pd.Series):
-    """levelの純変化と、そのパーセンテージポイント(Δ% = Δ*100)を返す。"""
-    s = pd.to_numeric(s, errors="coerce").dropna()
-    if s.empty:
-        return None, None, None, None
-    first = float(s.iloc[0])
-    last  = float(s.iloc[-1])
-    delta = last - first
-    delta_pp = delta * 100.0  # percentage points
-    return first, last, delta, delta_pp
-
-def write_stats_and_marker() -> None:
-    df = _load_df()
-    col = _pick_index_column(df)
-    s = pd.to_numeric(df[col], errors="coerce").dropna()
-
-    first, last, delta_level, delta_pp = _delta_level_and_pp(s)
-    # JSON は level と Δ%（pp）を両方持つ。サイト側は scale="level" を見て解釈。
-    payload = {
-        "index_key": INDEX_KEY,
-        "pct_1d": None if delta_pp is None else round(delta_pp, 6),  # Δ%（pp）
-        "delta_level": None if delta_level is None else round(delta_level, 6),
-        "scale": "level",
-        "updated_at": _now_utc_iso(),
-    }
-    (OUTDIR / f"{INDEX_KEY}_stats.json").write_text(
-        json.dumps(payload, ensure_ascii=False), encoding="utf-8"
-    )
-
-    # ポスト用の一行メモ（level と Δ%（pp）を併記）
-    marker = OUTDIR / f"{INDEX_KEY}_post_intraday.txt"
-    if delta_level is None:
-        marker.write_text(f"{INDEX_KEY.upper()} 1d: Δ=N/A (level)  Δ%=N/A\n", encoding="utf-8")
+    if len(df) >= 2:
+        ax.plot(df["date"].values, df["value"].values, linewidth=2.6)
+    elif len(df) == 1:
+        ax.scatter(df["date"].values, df["value"].values, s=30)
+        ax.text(df["date"].iloc[0], df["value"].iloc[0], "Insufficient history (need ≥ 2 days)",
+                color="#cfd3dc", fontsize=12, va="bottom", ha="left")
     else:
-        marker.write_text(
-            f"{INDEX_KEY.upper()} 1d: Δ={delta_level:+.6f} (level)  Δ%={delta_pp:+.2f}% "
-            f"(basis first-row valid={s.index[0].isoformat()}->{s.index[-1].isoformat()})\n",
-            encoding="utf-8",
-        )
+        ax.text(0.5, 0.5, "No data", color="#cfd3dc", fontsize=14, transform=ax.transAxes, ha="center")
 
-# ====== main ======
+    major = AutoDateLocator(minticks=5, maxticks=10)
+    ax.xaxis.set_major_locator(major)
+    ax.xaxis.set_major_formatter(AutoDateFormatter(major))
+    ax.yaxis.set_major_locator(MaxNLocator(nbins=7))
+    ax.yaxis.set_minor_locator(MaxNLocator(nbins=50))
+
+    fig.tight_layout()
+    fig.savefig(out_png, facecolor=fig.get_facecolor(), bbox_inches="tight")
+    plt.close(fig)
+    print(f"[long] WROTE: {out_png}")
+
+def main():
+    df = load_history()
+    if df.empty:
+        print("[long] no history -> skip")
+        return
+
+    spans = [("7d", 7), ("1m", 30), ("1y", 365)]
+    for tag, days in spans:
+        d = slice_span(df, days)
+        plot_span(d, f"{INDEX_KEY.upper()} ({tag} level)", "Level (index)", OUT_DIR / f"{INDEX_KEY}_{tag}.png")
+
 if __name__ == "__main__":
-    gen_pngs()
-    write_stats_and_marker()
+    main()
