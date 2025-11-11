@@ -1,0 +1,20 @@
+{
+  "index_key": "ASTRA4",
+  "label": "ASTRA4",
+  "category": "宇宙ベンチャー",
+  "description": "日本の宇宙関連スタートアップ主要4銘柄で構成する等ウェイト短期指数。日中スナップショットは前日終値比（％）でプロット。",
+  "methodology": {
+    "universe": "日本の上場宇宙関連ベンチャー（成長市場等を含む）",
+    "weighting": "等ウェイト（構成4銘柄の単純平均）",
+    "calc_basis": "prev_close（前日終値比, ％）",
+    "intraday_source": "各構成銘柄の5分足/1分足終値",
+    "rebalancing": "随時（上場/流動性などを考慮しアドホックに見直し）",
+    "notes": "急騰・急落等の外れ値は可視化の品質を保つため上限±25%でクリップ処理。"
+  },
+  "constituents": [
+    { "ticker": "9348.T", "name": "ispace" },
+    { "ticker": "186A.T", "name": "Astroscale Holdings" },
+    { "ticker": "5595.T", "name": "QPS研究所" },
+    { "ticker": "402A.T", "name": "アクセルスペースホールディングス" }
+  ]
+}
